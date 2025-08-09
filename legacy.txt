@@ -1,0 +1,31 @@
+sequenceDiagram
+    participant User
+    participant Frontend as React Frontend
+    participant Backend as Express Backend
+    participant API as Mastercard API
+    participant SDK as Web SDK
+
+    User->>Frontend: Select FI
+    Frontend->>Backend: Request Login Form (/api/login-forms/:institutionId)
+    Backend->>API: Create Login Form (POST /connect-components/institutions/:id/login-forms)
+    API-->>Backend: Return form data (id, eventStreamId, elements)
+    Backend-->>Frontend: Return form data
+    Frontend->>Frontend: Render <mastercard-form> with <mastercard-input>s
+    Frontend-->>User: Display form
+    User->>Frontend: Enter credentials & click Submit
+    Frontend->>SDK: Call form.submit()
+    SDK->>API: Submit credentials
+    API-->>SDK: Process & Return result (success/error/MFA)
+    SDK->>Frontend: Emit event (success/error/mfaChallenge)
+    Frontend-->>User: Handle event (e.g., show success/dialog)
+
+    alt MFA Challenge
+        Frontend->>Frontend: Render <mastercard-form type="mfaChallenge">
+        Frontend-->>User: Display MFA form
+        User->>Frontend: Enter MFA response & submit
+        Frontend->>SDK: Call form.submit()
+        SDK->>API: Submit MFA
+        API-->>SDK: Process & Return result
+        SDK->>Frontend: Emit event (success/error)
+        Frontend-->>User: Handle success
+    end
