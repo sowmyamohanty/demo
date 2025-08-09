@@ -1,0 +1,21 @@
+sequenceDiagram
+    participant User
+    participant Frontend as React Frontend
+    participant Backend as Express Backend
+    participant API as Mastercard API
+    participant FI as Financial Institution
+
+    User->>Frontend: Select FI (OAuth)
+    Frontend->>Backend: Request OAuth URL (/api/oauth-urls/:institutionId)
+    Backend->>API: Create OAuth URL (POST /connect-components/institutions/:id/oauth-urls)
+    API-->>Backend: Return {id, url, eventStreamId}
+    Backend-->>Frontend: Return data
+    Frontend->>Frontend: Redirect to OAuth URL
+    Frontend-->>User: Redirect user
+    User->>FI: Authenticate with FI (OAuth flow)
+    Note over FI,API: Callback to Mastercard
+    API->>Backend: Webhook or polling for status (using eventStreamId)
+    Backend->>API: Get status/updates
+    API-->>Backend: Return updates
+    Backend->>Frontend: Update via webhook/polling
+    Frontend-->>User: Update UI with success
