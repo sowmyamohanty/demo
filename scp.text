@@ -1,1 +1,54 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; frame-src 'self' https://connect.finicity.com https://connect2.finicity.com https://api.finicity.com https://*.mastercard.com; connect-src 'self' https://*.finicity.com https://*.mastercard.com; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.finicity.com;">
+const express = require('express');
+const helmet = require('helmet'); // Add this
+const path = require('path'); // If serving React build
+
+const app = express();
+
+// Set CSP using Helmet
+app.use(
+  helmet.contentSecurityPolicy({
+    directives: {
+      // Default fallback: allow only from same origin
+      defaultSrc: ["'self'"],
+      // Allow scripts from your own domain (React bundle) and any inline scripts if needed
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"], // Adjust if you have stricter needs; 'unsafe' may be required for some React setups
+      // Allow styles (e.g., for React CSS)
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      // Critical: Allow iframes from Finicity/Mastercard domains used by the SDK
+      frameSrc: [
+        "'self'",
+        'https://connect.finicity.com',
+        'https://connect2.finicity.com',
+        'https://api.finicity.com',
+        'https://*.mastercard.com' // For any Mastercard-hosted resources
+      ],
+      // Allow API connections (e.g., for SDK event streams or submissions)
+      connectSrc: [
+        "'self'",
+        'https://api.finicity.com',
+        'https://connect.finicity.com',
+        'https://connect2.finicity.com',
+        'https://*.mastercard.com'
+      ],
+      // Add other directives as needed (e.g., imgSrc for MFA images)
+      imgSrc: ["'self'", 'data:', 'https://*.finicity.com', 'https://*.mastercard.com'],
+      // If using web workers or other features, add workerSrc, etc.
+    },
+    // Report violations to a URI (optional, for monitoring)
+    reportOnly: false // Set to true for testing without blocking
+  })
+);
+
+// Serve static React build (adjust path as needed)
+app.use(express.static(path.join(__dirname, 'path/to/react/build')));
+
+// Your API routes (e.g., /api/login-forms, etc.)
+// ...
+
+// Fallback to serve React's index.html for client-side routing
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'path/to/react/build', 'index.html'));
+});
+
+app.listen(3000, () => console.log('Server running on port 3000'));
