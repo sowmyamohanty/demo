@@ -1,0 +1,98 @@
+// MastercardLoginForm.tsx
+import React, { useEffect, useRef, useState } from 'react';
+import { LoginFormApiResponse } from './types';
+
+declare global {
+  namespace JSX {
+    interface IntrinsicElements {
+      'mastercard-form': React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement> & {
+        id: string;
+        'event-stream-id': string;
+      }, HTMLElement>;
+      'mastercard-input': React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement> & {
+        id: string;
+      }, HTMLElement>;
+    }
+  }
+}
+
+interface Props {
+  loginFormData: LoginFormApiResponse;
+  onSuccess: (eventData?: any) => void;
+  onError: (errMsg?: string) => void;
+  onCancel: () => void;
+  onMfaRequired: (mfaEventData: any) => void;
+  loading?: boolean;
+}
+
+export default function MastercardLoginForm({
+  loginFormData, onSuccess, onError, onCancel, onMfaRequired, loading
+}: Props) {
+  const formRef = useRef<HTMLElement>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    const formEl = formRef.current;
+    if (!formEl) return;
+
+    const handleSubmit = (e: Event) => {
+      e.preventDefault();
+      setSubmitting(true);
+    };
+
+    const handleDone = (e: CustomEvent) => {
+      setSubmitting(false);
+      onSuccess(e.detail);
+    };
+
+    const handleError = (e: CustomEvent) => {
+      setSubmitting(false);
+      onError(e.detail?.message || 'Login error');
+    };
+
+    const handleCancel = () => {
+      setSubmitting(false);
+      onCancel();
+    };
+
+    const handleMfa = (e: CustomEvent) => {
+      setSubmitting(false);
+      onMfaRequired(e.detail);
+    };
+
+    formEl.addEventListener('submit', handleSubmit);
+    formEl.addEventListener('done', handleDone as EventListener);
+    formEl.addEventListener('error', handleError as EventListener);
+    formEl.addEventListener('cancel', handleCancel as EventListener);
+    formEl.addEventListener('mfaChallenge', handleMfa as EventListener);
+
+    return () => {
+      formEl.removeEventListener('submit', handleSubmit);
+      formEl.removeEventListener('done', handleDone as EventListener);
+      formEl.removeEventListener('error', handleError as EventListener);
+      formEl.removeEventListener('cancel', handleCancel as EventListener);
+      formEl.removeEventListener('mfaChallenge', handleMfa as EventListener);
+    };
+  }, []);
+
+  if (loading) return <p>Loading...</p>;
+
+  return (
+    <mastercard-form
+      id={loginFormData.id}
+      event-stream-id={loginFormData.eventStreamId}
+      ref={formRef}
+      style={{ display: 'block' }}
+    >
+      {loginFormData.elements.sort((a,b) => a.sortOrder - b.sortOrder).map(el => (
+        <div key={el.id} style={{ marginBottom: 12 }}>
+          <label htmlFor={el.id}>{el.label}</label>
+          <mastercard-input id={el.id}></mastercard-input>
+        </div>
+      ))}
+      <button id="submit-credentials" type="submit" disabled={submitting}>
+        {submitting ? 'Connecting...' : 'Connect Account'}
+      </button>
+    </mastercard-form>
+  );
+}
