@@ -1,0 +1,89 @@
+// MfaChallengeForm.tsx
+import React, { useEffect, useRef, useState } from 'react';
+
+declare global {
+  namespace JSX {
+    interface IntrinsicElements {
+      'mastercard-form': React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement> & {
+        id: string;
+        'event-stream-id': string;
+        type?: string;
+      }, HTMLElement>;
+      'mastercard-mfa-choice': React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement> & {
+        id: string;
+      }, HTMLElement>;
+    }
+  }
+}
+
+interface MfaChallengeData {
+  id: string;
+  eventStreamId: string;
+  mfaType: string;
+  prompt: string;
+  choiceIds: string[];
+}
+
+interface Props {
+  mfaData: MfaChallengeData;
+  onMfaSuccess: () => void;
+  onMfaError: (err?: string) => void;
+  onBack: () => void;
+}
+
+export default function MfaChallengeForm({ mfaData, onMfaSuccess, onMfaError, onBack }: Props) {
+  const formRef = useRef<HTMLElement>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    const formEl = formRef.current;
+    if (!formEl) return;
+
+    const handleSubmit = (e: Event) => {
+      e.preventDefault();
+      setSubmitting(true);
+    };
+
+    const handleDone = () => {
+      setSubmitting(false);
+      onMfaSuccess();
+    };
+
+    const handleError = (e: CustomEvent) => {
+      setSubmitting(false);
+      onMfaError(e.detail?.message || 'MFA error');
+    };
+
+    formEl.addEventListener('submit', handleSubmit);
+    formEl.addEventListener('done', handleDone as EventListener);
+    formEl.addEventListener('error', handleError as EventListener);
+
+    const submitBtn = formEl.querySelector('#submit-mfa');
+    submitBtn?.addEventListener('click', handleSubmit);
+
+    return () => {
+      formEl.removeEventListener('submit', handleSubmit);
+      formEl.removeEventListener('done', handleDone as EventListener);
+      formEl.removeEventListener('error', handleError as EventListener);
+      submitBtn?.removeEventListener('click', handleSubmit);
+    };
+  }, []);
+
+  return (
+    <mastercard-form
+      type="mfaChallenge"
+      id={mfaData.id}
+      event-stream-id={mfaData.eventStreamId}
+      ref={formRef}
+    >
+      <label htmlFor={mfaData.choiceIds[0]}>{mfaData.prompt}</label>
+      {mfaData.choiceIds.map(choiceId => (
+        <mastercard-mfa-choice key={choiceId} id={choiceId}></mastercard-mfa-choice>
+      ))}
+      <button id="submit-mfa" type="submit" disabled={submitting}>
+        {submitting ? 'Submitting...' : 'Submit'}
+      </button>
+      <button onClick={onBack} type="button">Back</button>
+    </mastercard-form>
+  );
+}
