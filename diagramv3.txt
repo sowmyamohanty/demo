@@ -1,0 +1,476 @@
+# Enhanced Architecture and Event Flow Diagrams - v3
+
+## System Architecture Diagram
+
+```mermaid
+%%{init: {'theme': 'neutral', 'securityLevel': 'loose'}}%%
+graph TD
+    subgraph "Checkout Application"
+        App[App Component]
+        Header[Header]
+        OrderSummary[Order Summary Card]
+        Address[Address Card]
+        Payment[Payment Options Card]
+        OrderDetails[Order Details]
+        Dialog[Modal Dialog]
+        MessageHandler[Event Handler]
+        ToastManager[Toast Notification System]
+        BankState[Bank Account State]
+        
+        App --> Header
+        App --> OrderSummary
+        App --> Address
+        App --> Payment
+        App --> OrderDetails
+        Payment --> Dialog
+        Payment --> MessageHandler
+        App --> ToastManager
+        App --> BankState
+        MessageHandler --> BankState
+        MessageHandler --> ToastManager
+    end
+    
+    subgraph "Link-Iframe-Finicity Application"
+        LinkApp[Link App Component]
+        FinicityProvider[Finicity Provider]
+        ConnectManager[Connect Manager]
+        InstSearch[Institution Search]
+        OAuthHandler[OAuth Handler]
+        LegacyForm[Legacy Login Form]
+        MFAHandler[MFA Challenge Handler]
+        MessageSender[Event Dispatcher]
+        APIService[API Service]
+        
+        LinkApp --> FinicityProvider
+        LinkApp --> ConnectManager
+        LinkApp --> InstSearch
+        LinkApp --> OAuthHandler
+        LinkApp --> LegacyForm
+        LinkApp --> MFAHandler
+        LinkApp --> MessageSender
+        ConnectManager --> APIService
+    end
+    
+    subgraph "Finicity Platform"
+        FinicityAPI[Finicity API]
+        FinicitySDK[Finicity SDK]
+        WebComponents[Finicity Web Components]
+        FIConnections[Financial Institution Connections]
+        
+        FinicitySDK --> FinicityAPI
+        WebComponents --> FinicitySDK
+        FinicityAPI --> FIConnections
+    end
+    
+    Dialog -->|iframe src| LinkApp
+    LinkApp --> FinicitySDK
+    MessageSender -->|LINK_READY| MessageHandler
+    MessageSender -->|LINK_SUCCESS| MessageHandler
+    MessageSender -->|LINK_CANCEL| MessageHandler
+    MessageSender -->|LINK_ERROR| MessageHandler
+    MessageSender -->|LINK_MFA_REQUIRED| MessageHandler
+    MessageHandler -->|HEARTBEAT| MessageSender
+    APIService --> FinicityAPI
+    
+    classDef primary fill:#d0e8ff,stroke:#3178c6,stroke-width:1px
+    classDef secondary fill:#e6f7ff,stroke:#0091ea,stroke-width:1px
+    classDef accent fill:#fff8e1,stroke:#ffc107,stroke-width:1px
+    classDef state fill:#e8f5e9,stroke:#43a047,stroke-width:1px
+    classDef communication fill:#f3e5f5,stroke:#8e24aa,stroke-width:1px
+    classDef finicity fill:#ffebee,stroke:#e53935,stroke-width:1px
+    
+    class App,LinkApp primary
+    class Header,OrderSummary,Address,Payment,OrderDetails secondary
+    class Dialog,InstSearch,OAuthHandler,LegacyForm,MFAHandler accent
+    class BankState,FinicityProvider state
+    class MessageHandler,MessageSender communication
+    class FinicityAPI,FinicitySDK,WebComponents,FIConnections finicity
+```
+
+## Finicity Web Components Integration Architecture
+
+```mermaid
+%%{init: {'theme': 'neutral', 'securityLevel': 'loose'}}%%
+graph TD
+    subgraph "Link-Iframe-Finicity Application"
+        LinkApp[App Component]
+        FinicityContext[Finicity Context]
+        ConnectManager[Connect Manager]
+        
+        subgraph "React Components"
+            InstSearch[Institution Search]
+            OAuthHandler[OAuth Handler]
+            LegacyLogin[Legacy Login Form]
+            MFAHandler[MFA Handler]
+        end
+        
+        subgraph "Finicity Web Components"
+            MCForm[mastercard-form]
+            MCInput[mastercard-input]
+        end
+        
+        LinkApp --> FinicityContext
+        LinkApp --> ConnectManager
+        ConnectManager --> InstSearch
+        ConnectManager --> OAuthHandler
+        ConnectManager --> LegacyLogin
+        ConnectManager --> MFAHandler
+        LegacyLogin --> MCForm
+        MFAHandler --> MCForm
+        MCForm --> MCInput
+    end
+    
+    subgraph "Backend API Proxy"
+        APIProxy[API Proxy]
+        TokenManager[Token Manager]
+        ConfigManager[Configuration Manager]
+        
+        APIProxy --> TokenManager
+        APIProxy --> ConfigManager
+    end
+    
+    subgraph "Finicity Platform"
+        ConnectAPI[Connect Components API]
+        OAuth[OAuth Services]
+        InstAPI[Institutions API]
+        
+        ConnectAPI --> OAuth
+        ConnectAPI --> InstAPI
+    end
+    
+    FinicitySDK[Finicity SDK]
+    OAuthPopup[OAuth Popup Window]
+    
+    ConnectManager --> FinicitySDK
+    FinicitySDK --> MCForm
+    FinicitySDK --> MCInput
+    FinicitySDK --> ConnectAPI
+    OAuthHandler --> OAuthPopup
+    OAuthPopup --> OAuth
+    InstSearch --> APIProxy
+    LegacyLogin --> APIProxy
+    APIProxy --> ConnectAPI
+    
+    classDef react fill:#61dafb,stroke:#282c34,stroke-width:1px
+    classDef webcomp fill:#ff6384,stroke:#282c34,stroke-width:1px
+    classDef backend fill:#36a2eb,stroke:#282c34,stroke-width:1px
+    classDef finicity fill:#ffce56,stroke:#282c34,stroke-width:1px
+    classDef window fill:#cc65fe,stroke:#282c34,stroke-width:1px
+    
+    class LinkApp,FinicityContext,ConnectManager,InstSearch,OAuthHandler,LegacyLogin,MFAHandler react
+    class MCForm,MCInput webcomp
+    class APIProxy,TokenManager,ConfigManager backend
+    class ConnectAPI,OAuth,InstAPI,FinicitySDK finicity
+    class OAuthPopup window
+```
+
+## OAuth Authentication Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant LinkIframe as Link-Iframe App
+    participant OAuthPopup as OAuth Popup
+    participant FinicitySDK as Finicity SDK
+    participant APIProxy as API Proxy
+    participant FinicityAPI as Finicity API
+    participant Bank as Financial Institution
+    
+    User->>LinkIframe: Select Bank
+    LinkIframe->>APIProxy: Request OAuth URL
+    APIProxy->>FinicityAPI: POST /connect-components/institutions/{id}/oauth-urls
+    Note over APIProxy,FinicityAPI: Includes customerId, redirectURI, configurationId
+    FinicityAPI-->>APIProxy: Return OAuth URL and eventStreamId
+    APIProxy-->>LinkIframe: Return OAuth URL
+    
+    LinkIframe->>OAuthPopup: Open popup with OAuth URL
+    OAuthPopup->>Bank: Navigate to bank login page
+    User->>Bank: Enter credentials
+    Bank->>Bank: Authenticate user
+    Bank->>FinicityAPI: Complete OAuth process
+    FinicityAPI->>OAuthPopup: Redirect to redirectURI
+    
+    FinicitySDK->>LinkIframe: loggedIn event
+    LinkIframe->>OAuthPopup: Close popup window
+    
+    FinicityAPI->>FinicitySDK: Process account discovery
+    FinicitySDK->>LinkIframe: success event
+    Note over FinicitySDK,LinkIframe: Contains accountId, institutionId, customerId
+    
+    LinkIframe->>APIProxy: Get account details
+    APIProxy->>FinicityAPI: Request account information
+    FinicityAPI-->>APIProxy: Return account details
+    APIProxy-->>LinkIframe: Return formatted account data
+    
+    LinkIframe->>Parent: Send LINK_SUCCESS message
+    Note over LinkIframe,Parent: Contains bank name, last4, account type, and Finicity IDs
+```
+
+## Legacy Authentication with MFA Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant LinkIframe as Link-Iframe App
+    participant FinicitySDK as Finicity SDK
+    participant APIProxy as API Proxy
+    participant FinicityAPI as Finicity API
+    
+    User->>LinkIframe: Select Legacy Bank
+    LinkIframe->>APIProxy: Request Login Form
+    APIProxy->>FinicityAPI: POST /connect-components/institutions/{id}/login-forms
+    Note over APIProxy,FinicityAPI: Includes customerId and configurationId
+    FinicityAPI-->>APIProxy: Return form ID, elements, and eventStreamId
+    APIProxy-->>LinkIframe: Return login form data
+    
+    LinkIframe->>LinkIframe: Render <mastercard-form> with <mastercard-input> elements
+    User->>LinkIframe: Enter credentials
+    User->>LinkIframe: Click Submit
+    
+    LinkIframe->>FinicitySDK: submit() form
+    FinicitySDK->>FinicityAPI: Submit credentials (securely)
+    
+    alt MFA Required
+        FinicityAPI->>FinicitySDK: Request MFA challenge
+        FinicitySDK->>LinkIframe: mfaChallenge event
+        LinkIframe->>LinkIframe: Render MFA challenge UI
+        LinkIframe->>Parent: Send LINK_MFA_REQUIRED message (informational)
+        
+        User->>LinkIframe: Complete MFA challenge
+        User->>LinkIframe: Submit MFA response
+        
+        LinkIframe->>FinicitySDK: submit() MFA form
+        FinicitySDK->>FinicityAPI: Submit MFA response
+        
+        alt Additional MFA Required
+            FinicityAPI->>FinicitySDK: Request additional MFA challenge
+            FinicitySDK->>LinkIframe: mfaChallenge event
+            Note over FinicitySDK,LinkIframe: Process repeats until all MFA is complete
+        else MFA Complete
+            FinicityAPI->>FinicitySDK: Process account discovery
+        end
+    else No MFA Required
+        FinicityAPI->>FinicitySDK: Process account discovery
+    end
+    
+    FinicitySDK->>LinkIframe: success event
+    Note over FinicitySDK,LinkIframe: Contains accountId, institutionId, customerId
+    
+    LinkIframe->>APIProxy: Get account details
+    APIProxy->>FinicityAPI: Request account information
+    FinicityAPI-->>APIProxy: Return account details
+    APIProxy-->>LinkIframe: Return formatted account data
+    
+    LinkIframe->>Parent: Send LINK_SUCCESS message
+    Note over LinkIframe,Parent: Contains bank name, last4, account type, and Finicity IDs
+```
+
+## Web Component Structure and Relationship
+
+```mermaid
+classDiagram
+    class MastercardForm {
+        +String id
+        +String eventStreamId
+        +submit()
+        +addEventListener()
+        +removeEventListener()
+    }
+    
+    class MastercardInput {
+        +String id
+        +String value
+        +String type
+        +Boolean disabled
+        +focus()
+        +blur()
+    }
+    
+    class FinicitySDK {
+        +initialize(config)
+        +handleEvent(event)
+        +registerEventListeners()
+    }
+    
+    class EventTypes {
+        <<enumeration>>
+        loggedIn
+        success
+        error
+        mfaChallenge
+    }
+    
+    MastercardForm "1" *-- "many" MastercardInput : contains
+    FinicitySDK -- MastercardForm : manages
+    FinicitySDK -- EventTypes : emits
+```
+
+## MFA Challenge Types and Handling
+
+```mermaid
+graph TD
+    MFAEvent[MFA Challenge Event] --> TypeCheck{Challenge Type?}
+    
+    TypeCheck -->|TFA_TEXT| TextChallenge[Text Input Challenge]
+    TypeCheck -->|TFA_CHOICE| ChoiceChallenge[Multiple Choice Challenge]
+    TypeCheck -->|TFA_MULTI| MultiChallenge[Multiple Selection Challenge]
+    TypeCheck -->|TFA_IMAGE| ImageChallenge[Image/Captcha Challenge]
+    TypeCheck -->|TFA_IMAGE_PROMPT| ImagePromptChallenge[Image with Prompt Challenge]
+    
+    TextChallenge --> RenderText[Render Text Input Form]
+    ChoiceChallenge --> RenderChoice[Render Multiple Choice Form]
+    MultiChallenge --> RenderMulti[Render Multiple Selection Form]
+    ImageChallenge --> RenderImage[Render Image with Input Form]
+    ImagePromptChallenge --> RenderImagePrompt[Render Image with Prompt and Options]
+    
+    RenderText --> UserInput[User Provides Input]
+    RenderChoice --> UserInput
+    RenderMulti --> UserInput
+    RenderImage --> UserInput
+    RenderImagePrompt --> UserInput
+    
+    UserInput --> Submit[Submit MFA Response]
+    Submit --> ResponseCheck{Valid Response?}
+    
+    ResponseCheck -->|Yes| Success[Proceed to Account Discovery]
+    ResponseCheck -->|No| NewChallenge[New Challenge or Error]
+    
+    NewChallenge --> TypeCheck
+```
+
+## Finicity to Application Event Mapping
+
+```mermaid
+graph LR
+    subgraph "Finicity SDK Events"
+        LoggedIn[loggedIn]
+        Success[success]
+        Error[error]
+        MFAChallenge[mfaChallenge]
+    end
+    
+    subgraph "Application Events"
+        LinkReady[LINK_READY]
+        LinkSuccess[LINK_SUCCESS]
+        LinkError[LINK_ERROR]
+        LinkMFA[LINK_MFA_REQUIRED]
+        LinkCancel[LINK_CANCEL]
+    end
+    
+    SDKInit[SDK Initialization] --> LinkReady
+    LoggedIn --> StateChange[Update Auth State]
+    Success --> FetchDetails[Fetch Account Details] --> LinkSuccess
+    Error --> ErrorMapping[Map Error Code] --> LinkError
+    MFAChallenge --> MFAHandler[Handle MFA Challenge] --> LinkMFA
+    UserAction[User Cancel Action] --> LinkCancel
+    
+    classDef finicity fill:#ffce56,stroke:#282c34,stroke-width:1px
+    classDef app fill:#36a2eb,stroke:#282c34,stroke-width:1px
+    classDef process fill:#ff6384,stroke:#282c34,stroke-width:1px
+    
+    class LoggedIn,Success,Error,MFAChallenge finicity
+    class LinkReady,LinkSuccess,LinkError,LinkMFA,LinkCancel app
+    class SDKInit,StateChange,FetchDetails,ErrorMapping,MFAHandler,UserAction process
+```
+
+## Security and Data Flow
+
+```mermaid
+graph TD
+    subgraph "Client Side"
+        subgraph "Checkout App"
+            CheckoutUI[Checkout UI]
+            IframeDialog[Iframe Dialog]
+        end
+        
+        subgraph "Link-Iframe App"
+            LinkAppUI[Link App UI]
+            WebComponents[Finicity Web Components]
+            SDKClient[Finicity SDK Client]
+        end
+    end
+    
+    subgraph "Server Side"
+        APIProxy[API Proxy Server]
+        Auth[Auth Service]
+        Secrets[Secret Management]
+    end
+    
+    subgraph "Finicity Services"
+        FinicityAPI[Finicity API]
+        FinicityAuth[Finicity Auth]
+        FIServices[Financial Institution Services]
+    end
+    
+    CheckoutUI -->|Display| IframeDialog
+    IframeDialog -->|Load| LinkAppUI
+    LinkAppUI -->|Render| WebComponents
+    WebComponents -->|Interact| SDKClient
+    
+    SDKClient -->|Secure Events| LinkAppUI
+    LinkAppUI -->|API Calls| APIProxy
+    APIProxy -->|Validate| Auth
+    APIProxy -->|Access| Secrets
+    
+    APIProxy -->|Authenticated Requests| FinicityAPI
+    FinicityAPI -->|Auth Tokens| FinicityAuth
+    FinicityAPI -->|Connect| FIServices
+    
+    %% Define secure data paths with different styles
+    WebComponents -.->|Credentials Never Exposed| SDKClient
+    SDKClient -.->|Direct Secure Channel| FinicityAPI
+    Secrets -.->|App Key & Token| APIProxy
+    
+    classDef ui fill:#9ccc65,stroke:#33691e,stroke-width:1px
+    classDef secure fill:#ffab91,stroke:#d84315,stroke-width:1px
+    classDef api fill:#90caf9,stroke:#1565c0,stroke-width:1px
+    classDef auth fill:#ce93d8,stroke:#7b1fa2,stroke-width:1px
+    
+    class CheckoutUI,IframeDialog,LinkAppUI ui
+    class WebComponents,SDKClient,Secrets secure
+    class APIProxy,FinicityAPI api
+    class Auth,FinicityAuth auth
+```
+
+## State Management and Data Flow
+
+```mermaid
+flowchart LR
+    subgraph Checkout
+        AppState[App State]
+        BankState[Bank Account State]
+        DialogState[Dialog State]
+        ToastState[Toast State]
+    end
+    
+    subgraph LinkIframe
+        ScreenState[Screen Navigation State]
+        AuthState[Authentication State]
+        FinicityState[Finicity SDK State]
+        MFAState[MFA Challenge State]
+        AccountState[Account Information State]
+    end
+    
+    UserInput[User Input] --> ScreenState
+    UserInput --> AuthState
+    
+    FinicitySDK[Finicity SDK Events] --> FinicityState
+    FinicitySDK --> MFAState
+    FinicitySDK --> AccountState
+    
+    FinicityState --> EventNormalization[Event Normalization]
+    MFAState --> EventNormalization
+    AccountState --> EventNormalization
+    AuthState --> EventNormalization
+    
+    EventNormalization --> EventDispatch[Post Message]
+    EventDispatch --> EventHandler[Message Event Handler]
+    
+    EventHandler -->|LINK_SUCCESS| BankState
+    EventHandler -->|All Events| DialogState
+    EventHandler -->|Success/Error/Cancel| ToastState
+    
+    BankState --> UIUpdate[UI Update]
+    DialogState --> UIUpdate
+    ToastState --> Notification[Show Notification]
+```
