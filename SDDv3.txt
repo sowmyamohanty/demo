@@ -1,0 +1,1749 @@
+# Solution Design Document (SDD) v3
+
+## Bank Account Linking Checkout Integration with Finicity Web Components
+
+**Document Version:** 3.0  
+**Date:** August 10, 2025  
+**Author:** GitHub Copilot  
+
+## Table of Contents
+
+1. [Introduction](#1-introduction)
+    - [Purpose](#11-purpose)
+    - [Scope](#12-scope)
+    - [System Overview](#13-system-overview)
+
+2. [Architecture Overview](#2-architecture-overview)
+    - [System Architecture](#21-system-architecture)
+    - [Component Diagram](#22-component-diagram)
+    - [Technical Stack](#23-technical-stack)
+
+3. [Finicity Web Components Integration](#3-finicity-web-components-integration)
+    - [Connect Components Overview](#31-connect-components-overview)
+    - [Integration Approach](#32-integration-approach)
+    - [Component Communication](#33-component-communication)
+
+4. [Detailed Design](#4-detailed-design)
+    - [Checkout Application](#41-checkout-application)
+    - [Link-Iframe Application with Finicity Integration](#42-link-iframe-application-with-finicity-integration)
+    - [Cross-Origin Communication Protocol](#43-cross-origin-communication-protocol)
+    - [State Management](#44-state-management)
+
+5. [Event Communication Architecture](#5-event-communication-architecture)
+    - [Finicity Event Types](#51-finicity-event-types)
+    - [Application Event Types](#52-application-event-types)
+    - [Event Flow Diagrams](#53-event-flow-diagrams)
+    - [Event Handlers and Processors](#54-event-handlers-and-processors)
+
+6. [User Experience Flow](#6-user-experience-flow)
+    - [Checkout Process](#61-checkout-process)
+    - [Bank Account Linking Flow](#62-bank-account-linking-flow)
+    - [OAuth vs Legacy Bank Linking](#63-oauth-vs-legacy-bank-linking)
+    - [Success Scenarios](#64-success-scenarios)
+    - [Error Scenarios](#65-error-scenarios)
+    - [Multi-Factor Authentication Handling](#66-multi-factor-authentication-handling)
+
+7. [Security Considerations](#7-security-considerations)
+    - [Finicity Web Components Security](#71-finicity-web-components-security)
+    - [Cross-Origin Security](#72-cross-origin-security)
+    - [Data Privacy](#73-data-privacy)
+    - [Iframe Isolation](#74-iframe-isolation)
+
+8. [Performance Considerations](#8-performance-considerations)
+    - [Loading Optimization](#81-loading-optimization)
+    - [Communication Efficiency](#82-communication-efficiency)
+    - [Resource Management](#83-resource-management)
+
+9. [Testing Strategy](#9-testing-strategy)
+    - [Unit Testing](#91-unit-testing)
+    - [Integration Testing](#92-integration-testing)
+    - [End-to-End Testing](#93-end-to-end-testing)
+    - [Security Testing](#94-security-testing)
+
+10. [Deployment Strategy](#10-deployment-strategy)
+    - [Environment Configuration](#101-environment-configuration)
+    - [Build Process](#102-build-process)
+    - [Release Management](#103-release-management)
+
+11. [Future Enhancements](#11-future-enhancements)
+
+---
+
+## 1. Introduction
+
+### 1.1 Purpose
+
+This document provides a comprehensive technical design for the checkout and bank account linking integration using Finicity Web Components. It outlines the architecture, component interaction, event communication protocols, and error handling mechanisms between the main checkout application, the embedded link-iframe application, and the Finicity Connect Components SDK. This enhanced version (v3) replaces the custom bank linking implementation with Mastercard's Finicity Connect Web Components for a more robust, secure, and standardized approach.
+
+### 1.2 Scope
+
+This solution enables customers to:
+- View order details and summary information during checkout
+- Select between payment methods (card or bank account)
+- Securely link their bank account through an isolated iframe using Finicity Web Components
+- Navigate the Finicity bank selection, OAuth authorization, or legacy credential forms
+- Complete multi-factor authentication if required by their financial institution
+- Experience a seamless flow with appropriate feedback during success and error scenarios
+- Complete their purchase with the linked bank account
+
+### 1.3 System Overview
+
+The system consists of two main applications built as a micro-frontend architecture, now enhanced with Finicity Web Components integration:
+
+1. **Checkout Application (`@acc/checkout`)**: Main checkout experience with order details, shipping address, and payment options.
+   - Acts as the host application
+   - Manages overall checkout state
+   - Controls the iframe modal dialog
+   - Processes messages from the iframe application
+
+2. **Link-Iframe Application (`@acc/link-iframe-finicity`)**: Isolated bank account linking flow embedded within the checkout application.
+   - Runs in a sandboxed iframe environment
+   - Integrates Finicity Web Components for bank selection, authentication, and account linking
+   - Handles OAuth redirects and legacy bank credentials
+   - Manages multi-factor authentication challenges
+   - Sends status messages to the parent application
+
+Both applications communicate via a well-defined postMessage protocol with strict origin validation.
+
+## 2. Architecture Overview
+
+### 2.1 System Architecture
+
+The solution employs a micro-frontend architecture with two separate applications that communicate via the PostMessage API, enhanced with Finicity Web Components:
+
+```
+┌────────────────────────────────────────────────────┐
+│              Checkout App                          │
+│                                                    │
+│  ┌─────────────┐      ┌─────────────┐              │
+│  │Order Summary│      │Order Details│              │
+│  └─────────────┘      └─────────────┘              │
+│                                                    │
+│  ┌─────────────┐                                   │
+│  │   Address   │                                   │
+│  └─────────────┘                                   │
+│                                                    │
+│  ┌───────────────────┐                             │
+│  │ Payment Options   │                             │
+│  │                   │                             │
+│  │  ┌─────────────┐  │                             │
+│  │  │Modal Dialog │  │                             │
+│  │  │             │  │                             │
+│  │  │ ┌─────────┐ │  │                             │
+│  │  │ │Link App │ │  │                             │
+│  │  │ │(iframe) │ │  │                             │
+│  │  │ └─────────┘ │  │                             │
+│  │  └─────────────┘  │                             │
+│  └───────────────────┘                             │
+└────────────────────────────────────────────────────┘
+                 │
+                 │ postMessage API
+                 ▼
+┌────────────────────────────────────────────────────┐
+│           Link-Iframe-Finicity App                 │
+│                                                    │
+│  ┌───────────────────────────────────────────────┐ │
+│  │  Finicity Web Components Integration          │ │
+│  │                                               │ │
+│  │  ┌─────────────┐    ┌───────────────────────┐ │ │
+│  │  │Bank Selector│    │OAuth / Legacy Forms   │ │ │
+│  │  └─────────────┘    └───────────────────────┘ │ │
+│  │                                               │ │
+│  │  ┌────────────────┐ ┌───────────────────────┐ │ │
+│  │  │MFA Challenges  │ │<mastercard-form>      │ │ │
+│  │  └────────────────┘ └───────────────────────┘ │ │
+│  │                                               │ │
+│  └───────────────────────────────────────────────┘ │
+│                                                    │
+└────────────────────────────────────────────────────┘
+                 │
+                 │ Finicity API
+                 ▼
+┌────────────────────────────────────────────────────┐
+│           Mastercard Finicity Platform             │
+│                                                    │
+│  ┌─────────────────┐    ┌────────────────────────┐ │
+│  │Connect API      │    │Financial Institutions  │ │
+│  └─────────────────┘    └────────────────────────┘ │
+│                                                    │
+└────────────────────────────────────────────────────┘
+```
+
+The key architectural characteristics include:
+
+- **Finicity Integration**: Utilizes Mastercard's Finicity Connect Web Components for secure bank linking
+- **Component-Based**: Uses custom Web Components (`<mastercard-form>`, `<mastercard-input>`) for bank interactions
+- **Isolation**: The Link-Iframe application operates in a sandboxed environment
+- **Secure Communication**: Well-defined messaging protocol between applications
+- **OAuth Support**: Handles both OAuth and legacy credential-based bank connections
+- **Error Resilience**: Robust error handling with timeout detection and recovery mechanisms
+- **MFA Handling**: Supports various multi-factor authentication challenges
+- **Responsive Design**: Fully responsive layout that adapts to different screen sizes
+- **Progressive Enhancement**: Fallback mechanisms when features or connections fail
+
+### 2.2 Component Diagram
+
+```
+┌───────────────────────────────────────────────────────────────────┐
+│                         Checkout Application                       │
+│                                                                   │
+│  ┌──────────────┐  ┌────────────┐  ┌─────────────────────────┐    │
+│  │Header        │  │AddressCard │  │OrderSummaryCard         │    │
+│  └──────────────┘  └────────────┘  └─────────────────────────┘    │
+│                                                                   │
+│  ┌────────────────────────┐        ┌─────────────────────────┐    │
+│  │PaymentOptionsCard      │        │OrderDetails             │    │
+│  │                        │        └─────────────────────────┘    │
+│  │  ┌──────────────────┐  │                                       │
+│  │  │Dialog            │  │                                       │
+│  │  │  ┌────────────┐  │  │        ┌─────────────────────────┐    │
+│  │  │  │iframe      │◄─┼──┼────────┤postMessage API          │    │
+│  │  │  └────────────┘  │  │        └─────────────────────────┘    │
+│  │  └──────────────────┘  │                                       │
+│  └────────────────────────┘                                       │
+└───────────────────────────────────────────────────────────────────┘
+                     │
+                     │ postMessage API
+                     ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                   Link-Iframe-Finicity Application                 │
+│                                                                   │
+│  ┌──────────────────┐  ┌─────────────────────────────────┐        │
+│  │FinicityProvider  │  │ConnectManager                   │        │
+│  └──────────────────┘  └─────────────────────────────────┘        │
+│                                                                   │
+│  ┌─────────────────────────────────────────────────────────┐      │
+│  │Finicity Web Components                                  │      │
+│  │                                                         │      │
+│  │  ┌─────────────┐  ┌───────────────┐  ┌───────────────┐  │      │
+│  │  │Bank Browser │  │OAuth Component│  │Legacy Login   │  │      │
+│  │  └─────────────┘  └───────────────┘  └───────────────┘  │      │
+│  │                                                         │      │
+│  │  ┌─────────────┐  ┌───────────────┐  ┌───────────────┐  │      │
+│  │  │MFA Handler  │  │<mastercard-   │  │<mastercard-   │  │      │
+│  │  │             │  │ form>         │  │ input>        │  │      │
+│  │  └─────────────┘  └───────────────┘  └───────────────┘  │      │
+│  └─────────────────────────────────────────────────────────┘      │
+│                                                                   │
+│  ┌──────────────────────┐  ┌─────────────────────────────┐        │
+│  │EventHandler          │  │APIService                   │        │
+│  └──────────────────────┘  └─────────────────────────────┘        │
+└───────────────────────────────────────────────────────────────────┘
+                     │
+                     │ Finicity API
+                     ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                   Mastercard Finicity Platform                     │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+### 2.3 Technical Stack
+
+**Shared Technology:**
+- **React**: 18.3.1
+  - Uses functional components with hooks
+  - Component-based architecture
+  - Ensures consistent rendering patterns across apps
+
+- **TypeScript**: 5.5.4
+  - Strong typing for all components and messages
+  - Interface definitions for cross-app communication
+  - Type guards for runtime validation
+
+- **Material UI**: 6.1.1
+  - Consistent design system across applications
+  - Responsive layout components
+  - Accessible UI elements
+
+- **Vite**: 5.4.2
+  - Fast development server with HMR
+  - Optimized production builds
+  - Environment variable handling
+
+**Checkout Application:**
+- **State Management**: Zustand 4.5.5
+  - Lightweight state management
+  - Used for managing bank account state
+  - Enables easy state updates from iframe events
+
+- **Data Fetching**: TanStack React Query 5.56.2
+  - Handles API calls for order information
+  - Caching and revalidation strategies
+  - Loading and error states management
+
+- **Testing**: Vitest 2.1.1, React Testing Library 16.0.1
+  - Component testing
+  - Integration testing for event handling
+  - Mocking capabilities for iframe communication
+
+**Link-Iframe-Finicity Application:**
+- **Finicity Connect Web Components**: Latest version
+  - Web Components for bank integration
+  - OAuth and legacy bank authentication
+  - MFA challenge handling
+
+- **Finicity JavaScript SDK**:
+  - Event handling for Connect Components
+  - Secure communication with Finicity API
+
+## 3. Finicity Web Components Integration
+
+### 3.1 Connect Components Overview
+
+Finicity Connect Web Components provide a standardized way to integrate bank account linking into applications. The key components include:
+
+1. **Configuration Objects**:
+   - Optional configurations to specify desired behavior
+   - Filter accounts by type (checking, savings)
+   - Created via `POST /connect-components/configurations` endpoint
+   - Returns a configuration ID for use in other API calls
+
+2. **Institution Logins - OAuth**:
+   - For financial institutions with direct connections
+   - Uses a tokenized OAuth flow
+   - Requests an OAuth URL via `POST /connect-components/institutions/{institution_id}/oauth-urls`
+   - Provides two presentation options:
+     - Popup window (window.open)
+     - Redirection (window.location.replace)
+
+3. **Institution Logins - Legacy**:
+   - For institutions without OAuth support
+   - Requests login form details via `POST /connect-components/institutions/{institution_id}/login-forms`
+   - Returns form elements to be rendered using Mastercard Web Components
+
+4. **Form Elements**:
+   - Custom elements for rendering institution login forms
+   - `<mastercard-form>` container for login forms
+   - `<mastercard-input>` elements for capturing credentials
+   - Uses IDs from the login form response to link components
+
+5. **Multi-Factor Authentication**:
+   - Handles various MFA challenges:
+     - TFA_TEXT: Single input for one-time passwords
+     - TFA_CHOICE: Multiple choice questions
+     - TFA_MUTLI: Multiple image selection
+     - TFA_IMAGE: Captcha-style image challenges
+     - TFA_IMAGE_PROMPT: Image prompt with text options
+
+6. **Event Handling**:
+   - Connect Components emit events for:
+     - loggedIn: User completed login with financial institution
+     - success: Account discovery completed
+     - error: Error during login or connection
+     - mfaChallenge: MFA required from the institution
+
+7. **Reconnection**:
+   - Support for fixing connections with error states
+   - Uses `POST /connect-components/customers/{customer_id}/institution-login-ids/{institution_login_id}/reconnections`
+   - Handles account refresh and error recovery
+
+### 3.2 Integration Approach
+
+The integration of Finicity Web Components into our application follows these principles:
+
+1. **Backend API Proxy**:
+   - All Finicity API calls are proxied through our backend
+   - Secures Finicity App Key and App Token
+   - Handles customer ID creation and management
+   - Provides configuration IDs based on application needs
+
+2. **Component Encapsulation**:
+   - Web Components are encapsulated within React components
+   - Provides consistent styling and behavior
+   - Simplifies event handling and state management
+
+3. **Progressive Enhancement**:
+   - Falls back to simpler interfaces when advanced features aren't available
+   - Handles browser compatibility issues
+   - Provides clear error messages for unsupported scenarios
+
+4. **Event Normalization**:
+   - Translates Finicity events into our application event system
+   - Normalizes event data for consistent handling
+   - Simplifies error handling and recovery
+
+5. **Security First**:
+   - Strict CORS and CSP policies
+   - Secure credential handling via Web Components
+   - No storage of sensitive information
+
+### 3.3 Component Communication
+
+The communication flow between our application and Finicity Web Components involves:
+
+1. **Component Initialization**:
+   ```typescript
+   // Initialize Finicity SDK
+   const connectWebSDK = new ConnectWebSDK({
+     appKey: FINICITY_APP_KEY,
+     onEvent: (event) => handleFinicityEvent(event)
+   });
+   ```
+
+2. **Event Handling**:
+   ```typescript
+   function handleFinicityEvent(event: FinicityEvent) {
+     switch (event.type) {
+       case 'loggedIn':
+         // Handle successful login
+         closeOAuthPopup();
+         break;
+       case 'success':
+         // Handle account discovery success
+         const { accountId, institutionId, customerId } = event.data;
+         handleSuccess(accountId, institutionId, customerId);
+         break;
+       case 'error':
+         // Handle error events
+         handleError(event.data.code, event.data.message);
+         break;
+       case 'mfaChallenge':
+         // Handle MFA challenge
+         renderMFAChallenge(event.data);
+         break;
+     }
+   }
+   ```
+
+3. **Form Rendering**:
+   ```html
+   <mastercard-form id="c315dc0d-fa08-488c-9601-77dea69acaeb" event-stream-id="8859489f-12aa-4fd3-bcf5-ba0249e643a3">
+     <mastercard-input id="a41305f9-6a03-452a-af2f-e53f2be165b5"></mastercard-input>
+     <mastercard-input id="a2830724-c1df-4fee-904d-4535502f9d6e"></mastercard-input>
+     <button class="btn btn-primary" id="submit-credentials">Submit</button>
+   </mastercard-form>
+   ```
+
+4. **Form Submission**:
+   ```javascript
+   document.querySelector('#submit-credentials').addEventListener('click', () => {
+     document.querySelector('mastercard-form').submit();
+   });
+   ```
+
+## 4. Detailed Design
+
+### 4.1 Checkout Application
+
+The checkout application remains largely unchanged from version 2, but with updated handling for the new Finicity-based link-iframe application.
+
+#### 4.1.1 Component Structure
+
+The checkout application consists of the following key components:
+
+- **App.tsx**: Main application container
+  - Manages toast notifications via state
+  - Maintains linked bank account state
+  - Renders layout grid for checkout components
+  - Handles application-wide state changes
+
+- **PaymentOptionsCard.tsx**: 
+  - Provides payment method selection (card or bank)
+  - Manages the iframe dialog for bank linking
+  - Handles messaging with the link-iframe application
+  - Displays linked bank information
+  - Implements timeout detection and retry logic
+  - Contains comprehensive error handling
+
+#### 4.1.2 Key Data Structures
+
+```typescript
+// Enhanced Bank account information structure to include Finicity data
+type BankSummary = { 
+  bankName: string;       // Name of the financial institution
+  last4: string;          // Last 4 digits of account number (PCI compliant)
+  accountType: 'Checking' | 'Savings'; // Type of bank account
+  nickname?: string;      // Optional user-provided nickname for the account
+  // Finicity-specific fields
+  accountId?: string;     // Finicity account ID
+  institutionId?: string; // Finicity institution ID
+  customerId?: string;    // Finicity customer ID
+};
+
+// Enhanced Message protocol between applications
+interface LinkMessage {
+  type: 'LINK_READY' | 'LINK_SUCCESS' | 'LINK_CANCEL' | 'LINK_ERROR' | 'LINK_MFA_REQUIRED' | 'HEARTBEAT';
+  payload?: { 
+    bank?: BankSummary;   // Present in LINK_SUCCESS messages
+    error?: {             // Present in LINK_ERROR messages
+      code: string;       // Error code for programmatic handling
+      message: string;    // User-friendly error message
+      details?: any;      // Additional error details
+    },
+    mfa?: {               // Present in LINK_MFA_REQUIRED messages
+      type: string;       // Type of MFA challenge
+      prompt: string;     // Text prompt for the user
+      id: string;         // Challenge ID
+    }
+  };
+}
+```
+
+### 4.2 Link-Iframe Application with Finicity Integration
+
+The link-iframe application is significantly enhanced to integrate Finicity Web Components.
+
+#### 4.2.1 Component Structure
+
+- **App.tsx**: Main container that manages:
+  - Finicity SDK initialization
+  - Event handling and communication with parent window
+  - Screen navigation state
+  - Loading and error states
+
+- **FinicityProvider.tsx**: Context provider for Finicity SDK
+  ```typescript
+  const FinicityContext = createContext<{
+    sdk: ConnectWebSDK | null;
+    isLoading: boolean;
+    error: Error | null;
+  }>({ sdk: null, isLoading: false, error: null });
+  
+  export const FinicityProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+    const [sdk, setSdk] = useState<ConnectWebSDK | null>(null);
+    const [isLoading, setIsLoading] = useState(true);
+    const [error, setError] = useState<Error | null>(null);
+    
+    useEffect(() => {
+      const initSdk = async () => {
+        try {
+          const response = await fetch('/api/finicity/config');
+          const { appKey } = await response.json();
+          
+          const connectSdk = new ConnectWebSDK({
+            appKey,
+            onEvent: (event) => {
+              // Event handling logic
+            }
+          });
+          
+          setSdk(connectSdk);
+          setIsLoading(false);
+        } catch (err) {
+          setError(err instanceof Error ? err : new Error('Failed to initialize Finicity SDK'));
+          setIsLoading(false);
+        }
+      };
+      
+      initSdk();
+    }, []);
+    
+    return (
+      <FinicityContext.Provider value={{ sdk, isLoading, error }}>
+        {children}
+      </FinicityContext.Provider>
+    );
+  };
+  ```
+
+- **InstitutionSearch.tsx**: Component for searching and selecting financial institutions
+  ```typescript
+  export const InstitutionSearch: React.FC = () => {
+    const { sdk } = useFinicity();
+    const [search, setSearch] = useState('');
+    const [institutions, setInstitutions] = useState<Institution[]>([]);
+    const [isLoading, setIsLoading] = useState(false);
+    
+    const handleSearch = async (query: string) => {
+      setIsLoading(true);
+      try {
+        // Call to backend proxy API that interfaces with Finicity
+        const response = await fetch(`/api/finicity/institutions?search=${encodeURIComponent(query)}`);
+        const data = await response.json();
+        setInstitutions(data.institutions);
+      } catch (error) {
+        console.error('Error searching institutions:', error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    
+    const handleSelect = async (institution: Institution) => {
+      // Handle institution selection based on type (OAuth vs Legacy)
+      if (institution.oauthEnabled) {
+        await handleOAuthInstitution(institution);
+      } else {
+        await handleLegacyInstitution(institution);
+      }
+    };
+    
+    return (
+      <div className="institution-search">
+        <TextField
+          label="Search for your bank"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              handleSearch(search);
+            }
+          }}
+        />
+        <Button onClick={() => handleSearch(search)}>Search</Button>
+        
+        {isLoading ? (
+          <CircularProgress />
+        ) : (
+          <div className="institution-list">
+            {institutions.map(institution => (
+              <Card 
+                key={institution.id} 
+                className="institution-card"
+                onClick={() => handleSelect(institution)}
+              >
+                <CardContent>
+                  <img 
+                    src={institution.logo || '/placeholder-bank.svg'} 
+                    alt={institution.name} 
+                  />
+                  <Typography>{institution.name}</Typography>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+  ```
+
+- **OAuthHandler.tsx**: Component for handling OAuth bank connections
+  ```typescript
+  export const OAuthHandler: React.FC<{ institutionId: string }> = ({ institutionId }) => {
+    const { customerId } = useParams();
+    const [isLoading, setIsLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const popupRef = useRef<Window | null>(null);
+    
+    useEffect(() => {
+      const getOAuthUrl = async () => {
+        try {
+          const response = await fetch('/api/finicity/oauth-url', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              customerId,
+              institutionId,
+              redirectURI: `${window.location.origin}/oauth-callback`
+            })
+          });
+          
+          const data = await response.json();
+          if (data.url) {
+            // Open popup for OAuth flow
+            popupRef.current = window.open(
+              data.url,
+              'finicityOAuth',
+              'width=600,height=600,location=yes,resizable=yes,scrollbars=yes'
+            );
+            
+            // Monitor for popup closure
+            const checkClosed = setInterval(() => {
+              if (popupRef.current?.closed) {
+                clearInterval(checkClosed);
+                // Handle popup closure
+                setError('OAuth window was closed before authentication completed');
+                setIsLoading(false);
+              }
+            }, 500);
+          }
+        } catch (err) {
+          setError('Failed to initiate OAuth process');
+          setIsLoading(false);
+        }
+      };
+      
+      getOAuthUrl();
+      
+      return () => {
+        // Close popup if component unmounts
+        if (popupRef.current && !popupRef.current.closed) {
+          popupRef.current.close();
+        }
+      };
+    }, [customerId, institutionId]);
+    
+    return (
+      <div className="oauth-handler">
+        {isLoading ? (
+          <div className="loading-container">
+            <CircularProgress />
+            <Typography>Connecting to your bank...</Typography>
+            <Typography variant="caption">
+              A popup window has opened for secure authentication.
+              Please complete the process in that window.
+            </Typography>
+          </div>
+        ) : error ? (
+          <div className="error-container">
+            <Alert severity="error">{error}</Alert>
+            <Button onClick={() => window.history.back()}>Go Back</Button>
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+  ```
+
+- **LegacyLoginForm.tsx**: Component for rendering legacy bank login forms
+  ```typescript
+  export const LegacyLoginForm: React.FC<{ institutionId: string }> = ({ institutionId }) => {
+    const { customerId } = useParams();
+    const [form, setForm] = useState<any>(null);
+    const [isLoading, setIsLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const formRef = useRef<HTMLElement | null>(null);
+    
+    useEffect(() => {
+      const getLoginForm = async () => {
+        try {
+          const response = await fetch('/api/finicity/login-form', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              customerId,
+              institutionId
+            })
+          });
+          
+          const data = await response.json();
+          setForm(data);
+          setIsLoading(false);
+        } catch (err) {
+          setError('Failed to load login form');
+          setIsLoading(false);
+        }
+      };
+      
+      getLoginForm();
+    }, [customerId, institutionId]);
+    
+    const handleSubmit = () => {
+      if (formRef.current) {
+        // Use Finicity SDK to submit the form
+        (formRef.current as any).submit();
+      }
+    };
+    
+    if (isLoading) {
+      return <CircularProgress />;
+    }
+    
+    if (error || !form) {
+      return <Alert severity="error">{error || 'Could not load login form'}</Alert>;
+    }
+    
+    return (
+      <div className="legacy-login-container">
+        <mastercard-form 
+          ref={formRef}
+          id={form.id} 
+          event-stream-id={form.eventStreamId}
+          className="finicity-form"
+        >
+          {form.elements.map((element: any) => (
+            <div key={element.id} className="form-field">
+              <label>{element.label}</label>
+              <mastercard-input 
+                id={element.id} 
+                className="finicity-input"
+              />
+            </div>
+          ))}
+          
+          <div className="form-actions">
+            <Button variant="contained" onClick={handleSubmit}>
+              Submit
+            </Button>
+            <Button variant="text" onClick={() => window.history.back()}>
+              Cancel
+            </Button>
+          </div>
+        </mastercard-form>
+      </div>
+    );
+  };
+  ```
+
+- **MFAHandler.tsx**: Component for handling multi-factor authentication challenges
+  ```typescript
+  export const MFAHandler: React.FC<{ challenge: MFAChallenge }> = ({ challenge }) => {
+    const formRef = useRef<HTMLElement | null>(null);
+    
+    const handleSubmit = () => {
+      if (formRef.current) {
+        // Use Finicity SDK to submit the MFA response
+        (formRef.current as any).submit();
+      }
+    };
+    
+    // Render different UI based on MFA challenge type
+    const renderChallengeUI = () => {
+      switch (challenge.mfaType) {
+        case 'TFA_TEXT':
+          return (
+            <>
+              <Typography>{challenge.prompt}</Typography>
+              <mastercard-input 
+                id={challenge.choiceIds[0]} 
+                className="finicity-input"
+              />
+            </>
+          );
+          
+        case 'TFA_CHOICE':
+          return (
+            <>
+              <Typography>{challenge.prompt}</Typography>
+              {challenge.choiceIds.map((choiceId) => (
+                <div key={choiceId} className="choice-option">
+                  <mastercard-input 
+                    id={choiceId} 
+                    className="finicity-input"
+                  />
+                </div>
+              ))}
+            </>
+          );
+          
+        case 'TFA_IMAGE':
+          return (
+            <>
+              <Typography>{challenge.prompt}</Typography>
+              <div className="captcha-image">
+                <img src={challenge.promptImage} alt="Verification challenge" />
+              </div>
+              <mastercard-input 
+                id={challenge.choiceIds[0]} 
+                className="finicity-input"
+              />
+            </>
+          );
+          
+        default:
+          return <Typography>Unsupported MFA challenge type: {challenge.mfaType}</Typography>;
+      }
+    };
+    
+    return (
+      <div className="mfa-challenge">
+        <mastercard-form 
+          ref={formRef}
+          id={challenge.id} 
+          event-stream-id={challenge.eventStreamId}
+          className="finicity-form"
+        >
+          {renderChallengeUI()}
+          
+          <div className="form-actions">
+            <Button variant="contained" onClick={handleSubmit}>
+              Submit
+            </Button>
+          </div>
+        </mastercard-form>
+      </div>
+    );
+  };
+  ```
+
+### 4.3 Cross-Origin Communication Protocol
+
+The applications communicate via the PostMessage API with enhanced message types for Finicity integration:
+
+#### 4.3.1 Message Types
+
+1. **LINK_READY**: 
+   - Sent from iframe to checkout when the iframe has fully loaded
+   - Ensures the checkout app knows when the iframe is ready for interaction
+
+2. **LINK_SUCCESS**:
+   - Sent from iframe to checkout upon successful account linking
+   - Includes linked bank account information and Finicity details
+   ```typescript
+   {
+     type: 'LINK_SUCCESS',
+     payload: {
+       bank: {
+         bankName: 'ACME Bank',
+         last4: '1234',
+         accountType: 'Checking',
+         nickname: 'Personal Account',
+         accountId: '5011882902',  // Finicity account ID
+         institutionId: '101732',  // Finicity institution ID
+         customerId: '5011884180'  // Finicity customer ID
+       }
+     }
+   }
+   ```
+
+3. **LINK_CANCEL**:
+   - Sent from iframe to checkout when the user cancels the linking flow
+
+4. **LINK_ERROR**:
+   - Sent from iframe to checkout when an error occurs during the linking process
+   - Enhanced with Finicity error codes and details
+   ```typescript
+   {
+     type: 'LINK_ERROR',
+     payload: {
+       error: {
+         code: 'INVALID_CREDENTIALS',
+         message: 'The credentials provided were invalid',
+         details: {
+           finicityCode: '10109',
+           recoverable: true
+         }
+       }
+     }
+   }
+   ```
+
+5. **LINK_MFA_REQUIRED**:
+   - New message type for handling MFA challenges in the parent application
+   - Used if the parent application needs awareness of MFA state
+   ```typescript
+   {
+     type: 'LINK_MFA_REQUIRED',
+     payload: {
+       mfa: {
+         type: 'TFA_TEXT',
+         prompt: 'Enter the code sent to your mobile device',
+         id: '3ea29b1a-0c2c-4052-a3e1-0cdb856163e8'
+       }
+     }
+   }
+   ```
+
+6. **HEARTBEAT**:
+   - Used for connection monitoring and iframe load verification
+
+### 4.4 State Management
+
+#### 4.4.1 Link-Iframe Application State
+
+The Link-Iframe application manages several key states for Finicity integration:
+
+1. **Finicity SDK State**:
+   ```typescript
+   const [sdk, setSdk] = useState<ConnectWebSDK | null>(null);
+   const [sdkLoaded, setSdkLoaded] = useState(false);
+   const [sdkError, setSdkError] = useState<Error | null>(null);
+   ```
+   - Tracks initialization of the Finicity SDK
+   - Manages loading and error states
+
+2. **Institution Selection State**:
+   ```typescript
+   const [institutions, setInstitutions] = useState<Institution[]>([]);
+   const [selectedInstitution, setSelectedInstitution] = useState<Institution | null>(null);
+   ```
+   - Stores search results for financial institutions
+   - Tracks the user's selected institution
+
+3. **Authentication Flow State**:
+   ```typescript
+   const [authFlow, setAuthFlow] = useState<'oauth' | 'legacy' | null>(null);
+   const [authState, setAuthState] = useState<'initial' | 'loading' | 'mfa' | 'success' | 'error'>('initial');
+   ```
+   - Tracks which authentication flow is active
+   - Manages the current state in the authentication process
+
+4. **MFA Challenge State**:
+   ```typescript
+   const [mfaChallenge, setMfaChallenge] = useState<MFAChallenge | null>(null);
+   ```
+   - Stores the current MFA challenge when applicable
+   - Reset after successful MFA completion
+
+5. **Account Information State**:
+   ```typescript
+   const [accountInfo, setAccountInfo] = useState<{
+     accountId: string;
+     institutionId: string;
+     institutionName: string;
+     accountType: string;
+     accountNumber: string;
+     routingNumber?: string;
+   } | null>(null);
+   ```
+   - Stores the information about linked accounts
+   - Used to create the final bank summary for the parent
+
+## 5. Event Communication Architecture
+
+### 5.1 Finicity Event Types
+
+Finicity Web Components emit the following events that need to be handled:
+
+1. **loggedIn**: 
+   - Emitted when a user completes the login flow with their financial institution
+   - For OAuth flows, signals that the OAuth popup can be closed
+   - Does not guarantee successful account connection yet
+
+2. **success**: 
+   - Emitted when account discovery has completed successfully
+   - Contains account details (accountId, institutionId, customerId)
+   - Final successful state in the connection flow
+
+3. **error**: 
+   - Emitted when an error occurs during the connection process
+   - Contains error code and message for handling
+   - May be recoverable or non-recoverable
+
+4. **mfaChallenge**: 
+   - Emitted when a financial institution requires additional verification
+   - Contains challenge details needed to render the appropriate UI
+   - Multiple challenges may be issued in sequence
+
+### 5.2 Application Event Types
+
+Our application translates Finicity events into the following application events:
+
+1. **LINK_READY**:
+   - Emitted when the Finicity SDK is initialized and ready
+   - Payload: None
+
+2. **LINK_SUCCESS**:
+   - Emitted when account linking is successful
+   - Triggered by Finicity's success event
+   - Payload: Bank summary with Finicity IDs
+
+3. **LINK_CANCEL**:
+   - Emitted when the user cancels the flow
+   - Can be triggered by user action or window close
+   - Payload: None
+
+4. **LINK_ERROR**:
+   - Emitted when an error occurs
+   - Translates Finicity error codes to application-specific codes
+   - Payload: Error details with code, message, and details
+
+5. **LINK_MFA_REQUIRED**:
+   - Emitted when MFA is required (informational for parent)
+   - Payload: MFA challenge type and ID
+
+### 5.3 Event Flow Diagrams
+
+#### 5.3.1 OAuth Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Checkout as Checkout App
+    participant LinkIframe as Link-Iframe App
+    participant FinicitySDK as Finicity SDK
+    participant OAuth as OAuth Popup
+    participant FinicityAPI as Finicity API
+    participant Bank as Financial Institution
+    
+    User->>Checkout: Select "Pay by bank"
+    User->>Checkout: Click "Link bank account"
+    Checkout->>LinkIframe: Open iframe with unique session
+    
+    LinkIframe->>FinicitySDK: Initialize SDK
+    LinkIframe->>Checkout: LINK_READY
+    
+    User->>LinkIframe: Search for bank
+    LinkIframe->>FinicityAPI: Search institutions
+    FinicityAPI->>LinkIframe: Return institution list
+    LinkIframe->>LinkIframe: Display bank options
+    
+    User->>LinkIframe: Select OAuth-enabled bank
+    LinkIframe->>FinicityAPI: Request OAuth URL
+    FinicityAPI->>LinkIframe: Return OAuth URL
+    
+    LinkIframe->>OAuth: Open popup with OAuth URL
+    OAuth->>Bank: Redirect to bank login
+    User->>Bank: Enter credentials
+    Bank->>OAuth: Authentication complete
+    OAuth->>FinicityAPI: Complete OAuth flow
+    
+    FinicitySDK->>LinkIframe: loggedIn event
+    LinkIframe->>OAuth: Close popup
+    
+    FinicityAPI->>FinicitySDK: Account discovery
+    FinicitySDK->>LinkIframe: success event
+    LinkIframe->>LinkIframe: Create bank summary
+    
+    LinkIframe->>Checkout: LINK_SUCCESS with bank details
+    Checkout->>Checkout: Update UI with bank info
+    Checkout->>Checkout: Close dialog
+    Checkout->>Checkout: Show success toast
+```
+
+#### 5.3.2 Legacy Authentication with MFA Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Checkout as Checkout App
+    participant LinkIframe as Link-Iframe App
+    participant FinicitySDK as Finicity SDK
+    participant FinicityAPI as Finicity API
+    
+    User->>Checkout: Select "Pay by bank"
+    User->>Checkout: Click "Link bank account"
+    Checkout->>LinkIframe: Open iframe with unique session
+    
+    LinkIframe->>FinicitySDK: Initialize SDK
+    LinkIframe->>Checkout: LINK_READY
+    
+    User->>LinkIframe: Search for bank
+    LinkIframe->>FinicityAPI: Search institutions
+    FinicityAPI->>LinkIframe: Return institution list
+    LinkIframe->>LinkIframe: Display bank options
+    
+    User->>LinkIframe: Select legacy bank
+    LinkIframe->>FinicityAPI: Request login form
+    FinicityAPI->>LinkIframe: Return form elements
+    
+    LinkIframe->>LinkIframe: Render <mastercard-form> with elements
+    User->>LinkIframe: Enter credentials
+    User->>LinkIframe: Submit form
+    
+    LinkIframe->>FinicitySDK: submit() on form
+    FinicitySDK->>FinicityAPI: Submit credentials
+    
+    FinicityAPI->>FinicitySDK: Request MFA challenge
+    FinicitySDK->>LinkIframe: mfaChallenge event
+    LinkIframe->>Checkout: LINK_MFA_REQUIRED (informational)
+    
+    LinkIframe->>LinkIframe: Render MFA challenge
+    User->>LinkIframe: Complete MFA challenge
+    User->>LinkIframe: Submit response
+    
+    LinkIframe->>FinicitySDK: submit() on MFA form
+    FinicitySDK->>FinicityAPI: Submit MFA response
+    
+    FinicityAPI->>FinicitySDK: Account discovery
+    FinicitySDK->>LinkIframe: success event
+    LinkIframe->>LinkIframe: Create bank summary
+    
+    LinkIframe->>Checkout: LINK_SUCCESS with bank details
+    Checkout->>Checkout: Update UI with bank info
+    Checkout->>Checkout: Close dialog
+    Checkout->>Checkout: Show success toast
+```
+
+### 5.4 Event Handlers and Processors
+
+#### 5.4.1 Finicity Event Handler
+
+```typescript
+// Inside ConnectManager.tsx
+const handleFinicityEvent = useCallback((event: FinicityEvent) => {
+  console.log('Finicity event:', event);
+  
+  switch (event.type) {
+    case 'loggedIn':
+      // OAuth login completed, close popup if open
+      if (oauthPopupRef.current && !oauthPopupRef.current.closed) {
+        oauthPopupRef.current.close();
+      }
+      setAuthState('loading');
+      break;
+      
+    case 'mfaChallenge':
+      console.log('MFA challenge:', event.data);
+      setMfaChallenge(event.data);
+      setAuthState('mfa');
+      
+      // Notify parent about MFA (informational only)
+      parent.postMessage({
+        type: 'LINK_MFA_REQUIRED',
+        payload: {
+          mfa: {
+            type: event.data.mfaType,
+            prompt: event.data.prompt,
+            id: event.data.id
+          }
+        }
+      }, '*');
+      break;
+      
+    case 'success':
+      console.log('Success event:', event.data);
+      const { institutionId, accountId, customerId } = event.data;
+      
+      // Get account details from Finicity
+      fetchAccountDetails(institutionId, accountId, customerId)
+        .then((accountDetails) => {
+          setAccountInfo({
+            accountId,
+            institutionId,
+            institutionName: accountDetails.institutionName,
+            accountType: accountDetails.type,
+            accountNumber: accountDetails.accountNumber,
+            routingNumber: accountDetails.routingNumber
+          });
+          
+          setAuthState('success');
+          
+          // Send success message to parent
+          parent.postMessage({
+            type: 'LINK_SUCCESS',
+            payload: {
+              bank: {
+                bankName: accountDetails.institutionName,
+                last4: accountDetails.accountNumber.slice(-4),
+                accountType: accountDetails.type === 'checking' ? 'Checking' : 'Savings',
+                accountId,
+                institutionId,
+                customerId
+              }
+            }
+          }, '*');
+        })
+        .catch((error) => {
+          handleError('ACCOUNT_DETAILS_ERROR', 'Failed to retrieve account details', error);
+        });
+      break;
+      
+    case 'error':
+      console.error('Finicity error:', event.data);
+      handleError(
+        mapFinicityErrorCode(event.data.code),
+        event.data.message,
+        { finicityCode: event.data.code }
+      );
+      break;
+  }
+}, [oauthPopupRef, handleError]);
+```
+
+#### 5.4.2 Error Mapping and Handling
+
+```typescript
+// Map Finicity error codes to application-specific codes
+function mapFinicityErrorCode(finicityCode: string): string {
+  const errorMap: Record<string, string> = {
+    '10109': 'INVALID_CREDENTIALS',
+    '10108': 'ACCOUNT_LOCKED',
+    '10118': 'MFA_TIMEOUT',
+    '10119': 'INSTITUTION_DOWN',
+    // Add more mappings as needed
+  };
+  
+  return errorMap[finicityCode] || 'UNKNOWN_ERROR';
+}
+
+// Handle errors with consistent formatting
+function handleError(code: string, message: string, details?: any) {
+  console.error(`Error ${code}: ${message}`, details);
+  
+  setAuthState('error');
+  
+  // Send error to parent window
+  parent.postMessage({
+    type: 'LINK_ERROR',
+    payload: {
+      error: {
+        code,
+        message,
+        details
+      }
+    }
+  }, '*');
+  
+  // Determine if error is recoverable
+  const isRecoverable = ['INVALID_CREDENTIALS', 'MFA_TIMEOUT'].includes(code);
+  if (isRecoverable) {
+    // Allow retry
+    setCanRetry(true);
+  }
+}
+```
+
+## 6. User Experience Flow
+
+### 6.1 Checkout Process
+
+The checkout process remains similar to v2, but with enhanced states for the Finicity integration:
+
+1. **Initial Page Load**:
+   - User sees a responsive layout with Order Summary, Address, and Payment Options cards
+   - User selects "Pay by bank" option and clicks "Link bank account" button
+
+2. **Dialog Opening**:
+   - Modal dialog opens with loading indicator while iframe initializes
+   - Link-iframe application loads and initializes Finicity SDK
+   - Dialog content appears when ready
+
+### 6.2 Bank Account Linking Flow
+
+The bank account linking flow is significantly enhanced with Finicity integration:
+
+1. **Institution Search**:
+   - User searches for their bank in the search field
+   - Results display with bank logos and names
+   - Popular banks may be shown as quick selection options
+   - Filtering happens in real-time as the user types
+
+2. **Institution Selection**:
+   - User selects their bank from the results
+   - System determines if the bank uses OAuth or legacy authentication
+   - Appropriate flow is triggered based on the institution type
+
+3. **Authentication**:
+   - For OAuth banks: Popup window opens with bank's login page
+   - For legacy banks: Finicity-generated form appears in the iframe
+
+4. **Multi-Factor Authentication** (if required):
+   - System detects MFA challenge from the bank
+   - Appropriate MFA UI is rendered based on the challenge type
+   - User completes the MFA challenge
+   - Process may repeat if additional MFA steps are required
+
+5. **Success**:
+   - Account information is retrieved and formatted
+   - Success message sent to parent application
+   - Dialog closes and bank information displayed in Payment Options card
+
+### 6.3 OAuth vs Legacy Bank Linking
+
+The solution handles two different authentication approaches:
+
+#### 6.3.1 OAuth Flow
+
+For banks with direct OAuth integration:
+
+1. System requests an OAuth URL from Finicity
+2. Popup window opens with the bank's authentication page
+3. User authenticates directly with their bank
+4. Bank redirects back to our application
+5. Finicity SDK processes the OAuth response
+6. Account details are retrieved and displayed
+
+**Benefits**:
+- More secure (credentials never pass through our system)
+- Modern user experience
+- Reduced liability for credential handling
+- Simpler MFA handling (managed by the bank)
+
+**Implementation**:
+```typescript
+async function handleOAuthInstitution(institution: Institution) {
+  try {
+    setSelectedInstitution(institution);
+    setAuthFlow('oauth');
+    setAuthState('loading');
+    
+    const response = await fetch('/api/finicity/oauth-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        customerId,
+        institutionId: institution.id,
+        redirectURI: `${window.location.origin}/oauth-callback`
+      })
+    });
+    
+    const data = await response.json();
+    
+    // Open popup for OAuth
+    const popup = window.open(
+      data.url,
+      'finicityOAuth',
+      'width=600,height=600,location=yes,resizable=yes,scrollbars=yes'
+    );
+    
+    // Store reference to popup
+    oauthPopupRef.current = popup;
+    
+    // Finicity SDK will emit events as the flow progresses
+  } catch (error) {
+    handleError('OAUTH_INIT_ERROR', 'Failed to start OAuth flow', error);
+  }
+}
+```
+
+#### 6.3.2 Legacy Flow
+
+For banks requiring credential input:
+
+1. System requests login form details from Finicity
+2. Finicity Web Components render the form fields
+3. User enters credentials in the form
+4. Credentials are securely submitted via Finicity components
+5. MFA challenges are handled if required
+6. Account details are retrieved and displayed
+
+**Implementation**:
+```typescript
+async function handleLegacyInstitution(institution: Institution) {
+  try {
+    setSelectedInstitution(institution);
+    setAuthFlow('legacy');
+    setAuthState('loading');
+    
+    const response = await fetch('/api/finicity/login-form', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        customerId,
+        institutionId: institution.id
+      })
+    });
+    
+    const formData = await response.json();
+    setLoginForm(formData);
+    setAuthState('initial');
+    
+    // Form will be rendered with Finicity Web Components
+  } catch (error) {
+    handleError('FORM_FETCH_ERROR', 'Failed to load login form', error);
+  }
+}
+```
+
+### 6.4 Success Scenarios
+
+1. **OAuth Success**:
+   - User selects an OAuth-enabled bank
+   - Authenticates in popup window
+   - Window closes automatically upon success
+   - Account details appear in Payment Options card
+   - Success toast notification appears
+   - User can complete checkout with linked account
+
+2. **Legacy Authentication Success**:
+   - User selects a legacy bank
+   - Enters credentials in Finicity form
+   - No MFA required or MFA successfully completed
+   - Account details appear in Payment Options card
+   - Success toast notification appears
+   - User can complete checkout with linked account
+
+### 6.5 Error Scenarios
+
+1. **Authentication Errors**:
+   - Invalid credentials entered
+   - System displays specific error message
+   - User can retry with correct credentials
+   - Clear guidance provided on next steps
+
+2. **OAuth Errors**:
+   - OAuth popup closed prematurely
+   - Bank authentication failed
+   - System provides clear error message
+   - Option to retry or choose different bank
+
+3. **MFA Errors**:
+   - Incorrect MFA response
+   - MFA timeout
+   - System shows specific error with guidance
+   - Option to retry MFA or restart process
+
+4. **Connection Errors**:
+   - Bank system unavailable
+   - Network connectivity issues
+   - Finicity API errors
+   - System provides clear error information
+   - Retry options when appropriate
+
+5. **SDK Initialization Errors**:
+   - Finicity SDK fails to load
+   - Configuration errors
+   - Fallback UI with error details
+   - Option to try again later
+
+### 6.6 Multi-Factor Authentication Handling
+
+The solution handles various MFA challenge types:
+
+1. **Text Input Challenges** (TFA_TEXT):
+   - Simple text input for verification codes or answers
+   - Clear prompt explaining what to enter
+   - Validation for expected input format
+
+2. **Multiple Choice** (TFA_CHOICE):
+   - List of options presented to the user
+   - Single selection required
+   - Clear instructions for making selection
+
+3. **Image Challenges** (TFA_IMAGE, TFA_IMAGE_PROMPT):
+   - Display image or captcha
+   - Text input for user's response
+   - Accessible alternatives when available
+
+4. **Multiple Selection** (TFA_MULTI):
+   - Multiple items can be selected
+   - Clear instructions for selection criteria
+   - Submit button to confirm choices
+
+## 7. Security Considerations
+
+### 7.1 Finicity Web Components Security
+
+Finicity Web Components provide enhanced security through:
+
+1. **Credential Isolation**:
+   - Credentials are captured by specialized Web Components
+   - Values never accessible to the host application
+   - Prevents credential exposure in JavaScript
+
+2. **Secure Communication**:
+   - Direct communication between Web Components and Finicity
+   - Encrypted transmission of sensitive data
+   - No storage of credentials in browser memory
+
+3. **API Key Management**:
+   - Finicity App Keys and Tokens managed through backend proxies
+   - Never exposed to client-side code
+   - Properly scoped permissions for API access
+
+4. **Tokenized Access**:
+   - OAuth flow uses tokenized access to institutions
+   - No persistent storage of bank credentials
+   - Time-limited access tokens
+
+### 7.2 Cross-Origin Security
+
+The solution implements strict cross-origin security measures:
+
+1. **Origin Validation**:
+   ```typescript
+   const expectedOrigin = new URL(LINK_ORIGIN).origin;
+   if (ev.origin !== expectedOrigin && !ev.origin.includes('localhost')) {
+     console.warn('Message from unexpected origin:', ev.origin);
+     return; // Reject message in production
+   }
+   ```
+
+2. **Content Security Policy**:
+   ```
+   Content-Security-Policy: default-src 'self'; 
+                           frame-src 'self' https://*.finicity.com; 
+                           connect-src 'self' https://*.finicity.com;
+                           script-src 'self' https://*.finicity.com;
+   ```
+
+3. **CORS Configuration**:
+   - Properly configured CORS headers on API endpoints
+   - Explicit allowed origins
+   - Credential handling configuration
+
+### 7.3 Data Privacy
+
+1. **Minimal Data Transfer**:
+   - Only essential account information is transferred
+   - Last 4 digits of account number only
+   - No full account credentials stored or transmitted
+
+2. **PCI Compliance**:
+   - Adherence to Payment Card Industry standards
+   - No storage of sensitive financial information
+   - Secure handling of all payment data
+
+3. **User Consent**:
+   - Clear explanations of data usage
+   - Explicit consent before bank connection
+   - Transparency about security measures
+
+### 7.4 Iframe Isolation
+
+1. **Sandbox Attributes**:
+   ```html
+   <iframe
+     sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-modals"
+     loading="eager"
+     title="Account linking"
+   />
+   ```
+
+2. **Feature Policy**:
+   ```
+   Feature-Policy: camera 'none'; microphone 'none'; geolocation 'none';
+   ```
+   - Restricts iframe capabilities to minimum required
+   - Prevents access to sensitive device features
+
+3. **Referrer Policy**:
+   ```
+   Referrer-Policy: strict-origin-when-cross-origin
+   ```
+   - Limits referrer information for security
+
+## 8. Performance Considerations
+
+### 8.1 Loading Optimization
+
+1. **Progressive Loading**:
+   - Core UI loads first
+   - Finicity SDK loads in parallel
+   - Clear loading states for user feedback
+
+2. **Preloading**:
+   ```html
+   <link rel="preload" href="https://connect.finicity.com/sdk/web/latest.js" as="script">
+   ```
+   - Preload critical resources
+   - Reduce perceived loading time
+
+3. **Performance Monitoring**:
+   - Track SDK loading time
+   - Measure key user interactions
+   - Optimize based on real-world data
+
+### 8.2 Communication Efficiency
+
+1. **Event Batching**:
+   - Combine related state updates when possible
+   - Reduce unnecessary message passing
+   - Optimize event handler performance
+
+2. **Minimal Payloads**:
+   - Only send essential data in messages
+   - Structured data formats for efficiency
+   - Avoid redundant information
+
+### 8.3 Resource Management
+
+1. **Memory Management**:
+   - Clean up event listeners when components unmount
+   - Proper disposal of Finicity SDK resources
+   - Close popups and dialogs when finished
+
+2. **Error Recovery**:
+   - Graceful degradation on failure
+   - Resource cleanup after errors
+   - Automatic retry strategies where appropriate
+
+## 9. Testing Strategy
+
+### 9.1 Unit Testing
+
+1. **Component Tests**:
+   - Test individual React components
+   - Mock Finicity SDK interactions
+   - Validate component behavior with different props
+
+2. **Event Handler Tests**:
+   - Test message processing logic
+   - Validate error handling
+   - Ensure proper state transitions
+
+3. **Utility Function Tests**:
+   - Test helper functions
+   - Validate data transformations
+   - Test error mapping logic
+
+### 9.2 Integration Testing
+
+1. **SDK Integration Tests**:
+   - Test SDK initialization
+   - Validate event handling
+   - Test with mock Finicity responses
+
+2. **Cross-Component Tests**:
+   - Test communication between components
+   - Validate state propagation
+   - Test complete user flows
+
+### 9.3 End-to-End Testing
+
+1. **Complete Flow Tests**:
+   - Test full linking process with sandbox accounts
+   - Test OAuth and legacy flows
+   - Validate MFA handling
+
+2. **Error Recovery Tests**:
+   - Test recovery from various error states
+   - Validate timeout handling
+   - Test boundary conditions
+
+### 9.4 Security Testing
+
+1. **Penetration Testing**:
+   - Test for common vulnerabilities
+   - Validate CORS and CSP effectiveness
+   - Test sandbox restrictions
+
+2. **Compliance Testing**:
+   - Validate PCI compliance
+   - Test data privacy measures
+   - Ensure secure credential handling
+
+## 10. Deployment Strategy
+
+### 10.1 Environment Configuration
+
+1. **Environment Variables**:
+   ```
+   # Finicity API Configuration
+   VITE_FINICITY_APP_KEY=<redacted>
+   VITE_FINICITY_PARTNER_ID=<redacted>
+   
+   # Application URLs
+   VITE_LINK_ORIGIN=https://link.example.com
+   VITE_API_BASE_URL=https://api.example.com
+   
+   # Feature Flags
+   VITE_ENABLE_OAUTH=true
+   VITE_ENABLE_SANDBOX=false
+   ```
+
+2. **Feature Flags**:
+   - Enable/disable OAuth support
+   - Toggle sandbox mode for testing
+   - Control MFA simulation
+
+### 10.2 Build Process
+
+1. **SDK Integration**:
+   - Include Finicity SDK in build process
+   - Optimize bundle size with code splitting
+   - Ensure proper versioning of dependencies
+
+2. **Asset Optimization**:
+   - Optimize images and assets
+   - Implement lazy loading
+   - Effective caching strategies
+
+### 10.3 Release Management
+
+1. **Phased Rollout**:
+   - Initial release to limited audience
+   - Monitoring and adjustment period
+   - Progressive rollout to all users
+
+2. **Monitoring**:
+   - Track connection success rates
+   - Monitor error frequencies
+   - Gather user feedback
+
+3. **Rollback Strategy**:
+   - Ability to quickly revert to previous version
+   - Feature flags to disable problematic flows
+   - Clear communication plan for issues
+
+## 11. Future Enhancements
+
+1. **Enhanced Institution Search**:
+   - Improved search algorithms
+   - Personalized bank suggestions
+   - Regional relevance sorting
+
+2. **Multi-Account Support**:
+   - Link multiple accounts simultaneously
+   - Account selection interface
+   - Primary/secondary account designation
+
+3. **Account Verification Enhancements**:
+   - Real-time balance verification
+   - Transaction history preview
+   - Advanced fraud detection
+
+4. **User Experience Improvements**:
+   - Streamlined MFA process
+   - Saved institution preferences
+   - Reconnection wizards for failed connections
+
+5. **Integration Expansions**:
+   - Support for international banks
+   - Additional payment methods
+   - Subscription management capabilities
