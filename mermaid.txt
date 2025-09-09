@@ -1,0 +1,18 @@
+flowchart TD
+    A[Merchant API Call for Session] --> B[Retrieve UI URL]
+    B --> C[Launch iFrame with URL]
+    C --> D[Consent Screen]
+    D -->|Continue| E[FI Selection Screen]
+    E -->|Search/Select FI| F[Check FI Type]
+    E -->|Manual Link| G[Manual Linking Screen]
+    F -->|Legacy| H[Legacy Login via Mastercard]
+    F -->|OAuth| I[OAuth Redirect Popup]
+    G --> J[Enter Account/Routing]
+    J -->|Authorize| K[Check Micro-Deposits]
+    K -->|Enabled| L[Challenge Screen]
+    K -->|Disabled| M[Fetch Accounts]
+    L -->|Confirm| M
+    H -->|Success Callback| M[Account Selection]
+    I -->|Success Event| M
+    M -->|Select & Continue| N[Success Screen]
+    N --> O[PostMessage Success & Close iFrame]
