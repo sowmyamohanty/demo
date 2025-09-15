@@ -1,0 +1,517 @@
+Software Design Document (SDD): Financial Institution Search Service (AWS OpenSearch Service)
+0. Executive Summary
+
+Build a low-latency, type-ahead search for financial institutions. Results are ranked primarily by popularity while still respecting text relevance, returned in paginated form optimized for scale via Point-in-Time (PIT) + search_after. The stack uses Amazon OpenSearch Service, API Gateway, AWS Lambda, Amazon CloudFront/S3 (for static UI), and Amazon Cognito (auth). Data is ingested via a controlled pipeline that normalizes, enriches, and indexes records.
+
+1. Goals & Non-Goals
+
+Goals
+
+Real-time, type-ahead UI with sub-100ms p95 from edge (after warm).
+
+Popularity-aware ranking (e.g., typing “cha” returns Chase Bank first).
+
+Scalable, deep pagination without performance degradation.
+
+Secure, multi-AZ, production-grade observability and resilience.
+
+Non-Goals
+
+Back-office CRUD UI for institution master data (assumed upstream).
+
+Cross-region active/active (initially single region, multi-AZ).
+
+Advanced personalization (future work; current is global popularity).
+
+2. High-Level Architecture
+2.1 Components
+
+Client UI: Type-ahead component (e.g., React) hosted on S3 + CloudFront.
+
+API Layer: Amazon API Gateway (REST) → AWS Lambda (Node.js/Java) → Amazon OpenSearch Service (VPC endpoint).
+
+Auth: Amazon Cognito (JWT) for UI/API; IAM auth between Lambda ↔ OpenSearch.
+
+Ingestion: AWS Lambda (ingester) triggered by S3 Put/EventBridge to normalize and index batches into OpenSearch (bulk API). Optional Glue/Step Functions for larger pipelines.
+
+Observability: CloudWatch Logs/Metrics/Alarms, OpenSearch Dashboards for search metrics.
+
+[Browser/UI] --HTTPS--> [CloudFront] --HTTPS--> [API Gateway] --> [Lambda Search]
+                                                         |
+                                                  [VPC Private Link]
+                                                         |
+                                                 [OpenSearch Domain]
+                                          ^
+                                          |  bulk ingest
+                             [S3 Staging]--[Lambda Ingest/ETL]
+
+3. Data Model & Indexing
+3.1 Source Data (provided sample)
+
+Each institution document derived from the sample JSON (one per institution). Key fields for search:
+
+{
+  "id": 4222,
+  "name": "FinBank",
+  "aliases": ["Fin Bank", "FinBank USA", "FB Financial"],        // derived
+  "class": "retirement",
+  "status": "online",
+  "oauthEnabled": true,
+  "popularity_score": 0.92,                                       // [0..1] or rank_feature
+  "timeZone": "America/Denver",
+  "branding": {
+    "logo": "https://.../logo.svg",
+    "primaryColor": "#0167AE"
+  },
+  "address": {
+    "city": "Murray", "state": "UT", "country": "USA"
+  },
+  "urlHomeApp": "https://www.example.com/home"
+}
+
+
+Popularity: a predefined metric (e.g., log-normalized monthly selections). Stored as both:
+
+popularity_score (float) for function scoring.
+
+popularity_rank_feature (rank_feature) to leverage rank-feature query boosts.
+
+3.2 Index Design
+
+Index name: institutions_v1 (use alias institutions_current for rollover/zero-downtime reindex).
+
+Shards/Replicas: start 3 primary, 1 replica (tune by cardinality & QPS).
+
+Refresh interval: 1s (adjust per ingest profile).
+
+ILM: optional warm/cold if data grows (institutions are small; ILM mostly for logs).
+
+3.2.1 Mappings (key parts)
+{
+  "settings": {
+    "analysis": {
+      "filter": {
+        "edge_ngram_filter": { "type": "edge_ngram", "min_gram": 1, "max_gram": 20 }
+      },
+      "analyzer": {
+        "name_prefix_analyzer": {
+          "tokenizer": "standard",
+          "filter": ["lowercase", "edge_ngram_filter"]
+        },
+        "name_search_analyzer": {
+          "tokenizer": "standard",
+          "filter": ["lowercase"]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "id": { "type": "keyword" },
+      "name": {
+        "type": "text",
+        "analyzer": "name_search_analyzer",
+        "fields": {
+          "prefix": { "type": "text", "analyzer": "name_prefix_analyzer" },
+          "raw":    { "type": "keyword", "ignore_above": 256 }
+        }
+      },
+      "aliases": {
+        "type": "text",
+        "analyzer": "name_search_analyzer",
+        "fields": { "prefix": { "type": "text", "analyzer": "name_prefix_analyzer" } }
+      },
+      "class": { "type": "keyword" },
+      "status": { "type": "keyword" },
+      "oauthEnabled": { "type": "boolean" },
+      "popularity_score": { "type": "float" },
+      "popularity_rank_feature": { "type": "rank_feature" },
+      "address.city": { "type": "keyword" },
+      "address.state": { "type": "keyword" },
+      "address.country": { "type": "keyword" },
+      "branding.logo": { "type": "keyword", "index": false }
+    }
+  }
+}
+
+
+Type-ahead choices
+
+Primary: edge_ngram (“name.prefix” & “aliases.prefix”) for low-latency, incremental matches.
+
+Optional complement: completion suggester for exact prefix UX; we prioritize edge_ngram to keep a single scoring path and easier pagination.
+
+3.3 Synonyms (Optional but Recommended)
+
+Add a synonyms set: “JPMorgan Chase, Chase, JP Morgan”, “BOFA, Bank of America”, “Citi, Citibank”, etc. Use a custom analyzer with synonym_graph filter for query-time expansion.
+
+4. Ingestion Pipeline
+4.1 Flow
+
+Upstream publishes a full snapshot or incremental delta (JSON) to S3.
+
+EventBridge triggers Lambda Ingest on object create.
+
+Lambda validates, normalizes (lower-case alias set, derive popularity_rank_feature), and bulk indexes to OpenSearch:
+
+For full rebuild: write to institutions_v2, then atomically switch alias institutions_current → institutions_v2.
+
+For deltas: upsert into current index.
+
+4.2 Bulk API Example (pseudo)
+POST /_bulk
+{"index": {"_index": "institutions_v2", "_id": "4222"}}
+{"id":4222,"name":"FinBank","aliases":["FinBank USA"],"popularity_score":0.92,"popularity_rank_feature":0.92,...}
+
+4.3 Data Quality
+
+Reject records missing id or name.
+
+Normalize popularity_score ∈ [0,1]; clamp and log anomalies.
+
+Maintain a QA dashboard of ingest counts, error rates (CloudWatch), and last update timestamps.
+
+5. Querying & Ranking
+5.1 Query Goals
+
+Prefix tolerance for type-ahead: match name.prefix and aliases.prefix.
+
+Popularity-first ranking while preserving relevance.
+
+Lightweight filters (e.g., status: online, optional country).
+
+5.2 Query DSL (Popularity-aware)
+POST /institutions_current/_search
+{
+  "size": 10,
+  "track_total_hits": false,
+  "query": {
+    "function_score": {
+      "query": {
+        "bool": {
+          "filter": [{ "term": { "status": "online" } }],
+          "should": [
+            { "match_phrase_prefix": { "name": { "query": "cha" } }},          // precise prefix
+            { "multi_match": {
+                "query": "cha",
+                "type": "most_fields",
+                "fields": ["name.prefix^3", "aliases.prefix^2", "name^1", "aliases^0.5"]
+            }}
+          ],
+          "minimum_should_match": 1
+        }
+      },
+      "functions": [
+        { "field_value_factor": {
+            "field": "popularity_score",
+            "factor": 1.0,
+            "modifier": "sqrt",
+            "missing": 0.01
+        }},
+        { "weight": 1.0, "filter": { "exists": { "field": "popularity_rank_feature" } } }
+      ],
+      "score_mode": "sum",
+      "boost_mode": "sum"
+    }
+  },
+  "sort": [
+    { "_score": "desc" },
+    { "popularity_score": "desc" },
+    { "name.raw": "asc" },
+    { "id": "asc" }
+  ]
+}
+
+
+Why this works
+
+match_phrase_prefix gives strong signal for “starts with”.
+
+edge_ngram fields ensure incremental keystrokes still match quickly.
+
+function_score pushes popular institutions up even when text scores are similar.
+
+Deterministic tie-breakers (name.raw, id) stabilize pagination.
+
+5.3 Pagination Strategy (PIT + search_after)
+
+Create a PIT for a consistent snapshot.
+
+Use search_after with the last hit’s sort array to fetch the next page.
+
+Avoid large from offsets (no deep pagination slowdown).
+
+OpenSearch calls
+
+POST /_pit?keep_alive=1m
+{}
+
+
+Response:
+
+{ "pit_id": "9z-abc123..." }
+
+
+Search with PIT + search_after:
+
+POST /_search
+{
+  "size": 10,
+  "pit": { "id": "9z-abc123...", "keep_alive": "1m" },
+  "sort": [
+    { "_score": "desc" },
+    { "popularity_score": "desc" },
+    { "name.raw": "asc" },
+    { "id": "asc" }
+  ],
+  "query": { ...as above... },
+  "search_after": [12.345, 0.92, "Chase Bank", 987]   // from last hit of prev page
+}
+
+
+Cursor Encoding: API will base64-encode the tuple {pit_id, sort_values[]} into a cursor returned to the UI. On final page, omit nextCursor.
+
+6. API Design
+6.1 Endpoints
+
+GET /v1/institutions/search?q=cha&pageSize=10&cursor=...&country=USA
+
+GET /v1/institutions/{id} (optional details endpoint)
+
+Headers: Authorization: Bearer <Cognito-JWT>
+Rate Limits: API Gateway usage plan (e.g., 300 RPS burst, 1000 RPM steady per client).
+
+6.2 Response (search)
+{
+  "results": [
+    {
+      "id": 123,
+      "name": "Chase Bank",
+      "branding": { "logo": "https://.../logo.svg", "primaryColor": "#005EB8" },
+      "oauthEnabled": true,
+      "status": "online",
+      "country": "USA",
+      "score": 13.21,
+      "popularity": 0.99
+    }
+  ],
+  "nextCursor": "eyJwaXRJZCI6Ij...Iiwic29ydCI6WzEzLjIxLDAuOTksIkNoYXNlIEJhbmsiLDEyM119"
+}
+
+
+Behavior
+
+If cursor is omitted, API: creates a PIT, runs the initial query, returns nextCursor.
+
+If cursor present, API: resumes with provided PIT and search_after values.
+
+If PIT expired: transparently creates a new PIT and re-executes from the original q and sort (document order might shift slightly; we set a short keep_alive and encourage quick paging).
+
+7. UI/UX Requirements (Type-Ahead)
+
+Debounce keystrokes (e.g., 150–250ms).
+
+Minimum 1–2 characters before firing queries.
+
+Show top 8–10 suggestions with branding logo (if available).
+
+Keyboard navigation (↑/↓, Enter), mouse hover, and click support.
+
+Show loading state; hide on blur; cache recent queries in memory.
+
+Respect API pageSize; for scrollable list, use nextCursor to fetch next page.
+
+8. Security & Compliance
+
+Network: OpenSearch in VPC only; Lambda in same VPC subnets/SecGroups; API GW ↔ Lambda public; UI via CloudFront.
+
+AuthN: Cognito user pools; JWT verification at API Gateway or Lambda (custom authorizer).
+
+AuthZ: IAM role for Lambda with least privilege (OpenSearch HTTPs access to specific index).
+
+Encryption: TLS in transit; OpenSearch encryption at rest + node-to-node TLS; S3 KMS bucket encryption.
+
+Logging: Access logs (API GW), CloudWatch logs (Lambda), audit logs (OpenSearch fine-grained access control).
+
+PII: Minimal; institution data is public-like. Avoid logging query strings verbatim if they could contain user identifiers (unlikely).
+
+9. Performance, Scale & SLOs
+
+SLO: p95 API latency ≤ 120ms (edge to CF), p99 ≤ 250ms for hot cache; cold start mitigated via provisioned concurrency for Lambda Search.
+
+QPS: Start 200 QPS steady; scale with Lambda concurrency and OpenSearch instance types (e.g., c7g.search).
+
+Caching: CloudFront short TTL (e.g., 10–30s) for identical q responses optional; but ensure respect for PIT semantics (generally disable caching when using PIT; only cache pre-PIT “head” queries like the first page).
+
+Index Size: Institutions dataset is typically small (<< 1M docs). Focus on latency tuning (analyzers, doc values, proper sorting fields).
+
+10. Error Handling
+
+4xx: validation errors (q missing, pageSize > max), expired cursor (regenerate PIT & retry initial page).
+
+5xx: OpenSearch timeouts → retry with exponential backoff; circuit breaker threshold to protect cluster.
+
+Degraded Mode: If OpenSearch unavailable, return a 503 with Retry-After, optionally fallback to an in-memory top-N popular list for empty queries.
+
+11. Observability & Ops
+
+Metrics: QPS, p50/p95/p99 latency, error rate, throttles, OpenSearch queue/rejects, JVM heap, CPU, storage.
+
+Tracing: X-Ray (API GW + Lambda). Add correlation IDs in query params/headers.
+
+Alarms: On 5xx > threshold, latency SLO breach, OS cluster red/yellow status, CPU > 80% sustained.
+
+12. Index Lifecycle & Zero-Downtime Reindex
+
+Create institutions_v{n+1} with new mappings/analyzers.
+
+Bulk reindex from source (S3 → Lambda → bulk).
+
+Validate (shadow reads).
+
+Atomically flip alias institutions_current → institutions_v{n+1}.
+
+Delete old index after retention window.
+
+13. Detailed Lambda Search Pseudocode
+interface Cursor { pitId: string; sort: (string|number)[]; q: string; ts: number; }
+
+export async function handler(event) {
+  const q = event.queryStringParameters?.q ?? "";
+  const pageSize = clamp(parseInt(event.queryStringParameters?.pageSize ?? "10"), 1, 50);
+  const cursorB64 = event.queryStringParameters?.cursor;
+
+  let pitId: string, searchAfter: any[] | undefined, queryQ = q;
+
+  if (!cursorB64) {
+    pitId = await createPit("1m");
+  } else {
+    const cursor: Cursor = JSON.parse(Buffer.from(cursorB64, "base64").toString("utf8"));
+    queryQ = cursor.q;                     // trust original q to ensure stable pages
+    pitId = cursor.pitId;
+    searchAfter = cursor.sort;
+  }
+
+  const body = buildPopularityQuery(queryQ, pageSize, pitId, searchAfter); // DSL from §5.2 + §5.3
+  const resp = await osFetch("/_search", body);
+
+  const hits = resp.hits.hits.map(h => formatHit(h));
+  const last = resp.hits.hits.at(-1);
+  const nextCursor = last
+    ? b64({ pitId, sort: last.sort, q: queryQ, ts: Date.now() })
+    : undefined;
+
+  return {
+    statusCode: 200,
+    body: JSON.stringify({ results: hits, nextCursor }),
+    headers: { "Content-Type": "application/json" }
+  };
+}
+
+14. Sample Documents from Provided JSON
+
+Transform rules:
+
+Keep relevant UI fields (id, name, branding.logo, oauthEnabled, status, address.country/state/city).
+
+Derive aliases from specialText, urlHomeApp hostnames, curated synonym tables.
+
+Set popularity_score from upstream metric (normalized 0–1).
+
+Mirror into popularity_rank_feature with same value.
+
+Example (based on your sample):
+
+{
+  "id": 4222,
+  "name": "FinBank",
+  "aliases": ["Fin Bank","FinBank USA"], 
+  "oauthEnabled": true,
+  "status": "online",
+  "popularity_score": 0.72,
+  "popularity_rank_feature": 0.72,
+  "class": "retirement",
+  "address": { "city": "Murray", "state": "UT", "country": "USA" },
+  "branding": { "logo": "https://prod-carpintero-branding.s3.us-west-2.amazonaws.com/5/logo.svg", "primaryColor":"#0167AE" }
+}
+
+15. Testing Strategy
+
+Unit: Query builder (weights, fields, sort), cursor encode/decode, PIT management.
+
+Integration: Spin ephemeral index, load a fixture set (incl. “Chase Bank”, “Charles Schwab”, “Chatham…”) to validate that q="cha" ranks Chase Bank first.
+
+Perf: K6/Locust: simulate 95th percentile typing cadence, assert p95<120ms at target QPS.
+
+Relevance: Golden set tests with expected order for 50+ queries; guard against regressions when tuning analyzers.
+
+16. Risks & Mitigations
+
+Analyzer drift (relevance changes): lock golden tests; version analyzers under new index.
+
+PIT expiry mid-paging: API regenerates PIT and restarts from page 1 (document); communicate to UI if needed.
+
+Hot shard from popularity skew: choose shard count wisely; consider index routing on first letter; monitor shard imbalance.
+
+Cold starts: Provisioned concurrency on Lambda Search.
+
+17. Cost Considerations (typical small dataset)
+
+OpenSearch: t3.small.search/c7g.large.search multi-AZ to start.
+
+Lambda: Few ms compute per query; main cost is OS cluster.
+
+API GW/CF: Low; primarily data transfer.
+
+Optimization: Right-size shards; disable unnecessary stored fields; return minimal payloads.
+
+18. Deliverables
+
+OpenSearch index template & analyzer config.
+
+Ingestion Lambda (S3 → Bulk) with IaC (CloudFormation/CDK/Terraform).
+
+Search Lambda + API Gateway definitions (OpenAPI).
+
+React Type-ahead component with debounce, cursor paging.
+
+Runbooks (on-call), dashboards, alarms.
+
+19. Appendix
+19.1 Create Index (condensed)
+PUT /institutions_v1
+{ ...settings/mappings from §3.2.1 ... }
+PUT /_aliases
+{ "actions": [{ "add": { "index": "institutions_v1", "alias": "institutions_current" } }] }
+
+19.2 Example: “cha” returns Chase first
+
+Popularity: Chase Bank = 0.99; Charles Schwab = 0.85; Chatham… = 0.20.
+
+With function_score + prefix analyzers, Chase surfaces at rank #1 even if other names have similar “cha” prefix matches.
+
+19.3 Minimal OpenAPI Snippet
+paths:
+  /v1/institutions/search:
+    get:
+      parameters:
+        - in: query; name: q; schema: { type: string }
+        - in: query; name: pageSize; schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+        - in: query; name: cursor; schema: { type: string }
+        - in: query; name: country; schema: { type: string }
+      responses:
+        "200": { description: OK }
+        "400": { description: Bad Request }
+        "503": { description: Service Unavailable }
+
+19.4 Relevance Tuning Tips
+
+Boost name.prefix over aliases.prefix.
+
+Add lightweight rescore for the top 100 hits with match_phrase_prefix (optional).
+
+Audit synonyms quarterly and update analyzer in a new index version.
+
+This design meets the requirements: type-ahead UI, popularity-biased ranking (e.g., “cha” → Chase Bank first), and scalable pagination using PIT + search_after, with a clear AWS architecture, robust ingestion, secure operations, and testable, production-ready query construction.
+
+ChatGP
