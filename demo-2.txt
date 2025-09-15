@@ -1,0 +1,228 @@
+# Solution Design Document (SDD) and Technical Design Document (TDD) for Financial Institution Search Backend Service
+
+## 1. Introduction
+
+### 1.1 Purpose
+This document outlines the solution architecture and technical design for a backend service that enables searching for financial institutions based on user-provided search terms. The service fetches institution data from the Mastercard Institutions API, enriches it with popularity indicators, stores it in AWS-managed databases, and exposes a RESTful API for paginated search results. Popular institutions are prioritized in search rankings to improve user experience.
+
+The design emphasizes reliability, scalability, security, and performance, leveraging AWS serverless services to minimize operational overhead.
+
+### 1.2 Scope
+- **In Scope**: Data ingestion from Mastercard API, storage in DynamoDB, indexing in OpenSearch, REST API for search, error handling, scalability, and security.
+- **Out of Scope**: Frontend implementation, real-time updates beyond periodic ingestion, integration with other financial services (e.g., authentication for institution logins).
+
+### 1.3 Assumptions
+- The Mastercard API requires authentication (e.g., API key or OAuth), which will be managed via AWS Secrets Manager.
+- The "Popular Institutions" table in DynamoDB is pre-populated manually or via a separate process with a list of known popular institution names (e.g., "Chase", "Bank of America").
+- Data ingestion runs periodically (e.g., daily) to refresh institution data, as the Mastercard API may update infrequently.
+- Search queries are case-insensitive and fuzzy to handle typos.
+- Total institutions from Mastercard API: Approximately 5,000–10,000 based on typical financial API datasets (to be confirmed via initial fetch).
+
+### 1.4 Constraints
+- Mastercard API rate limits (assumed 100 requests/minute; to be verified).
+- AWS service limits (e.g., DynamoDB write capacity, OpenSearch document size < 1MB).
+- No direct internet access from Mastercard API to AWS; use polling via Lambda.
+
+## 2. Architectural Design
+
+### 2.1 High-Level Architecture Diagram
+The architecture is serverless, using AWS services for ingestion, storage, search, and API exposure. Below is a textual representation (ASCII art) of the architecture:
+
+```
++-------------------+     +-------------------+     +-------------------+
+| Mastercard API    | --> | AWS Lambda        | --> | DynamoDB Tables   |
+| (GET /institutions|     | (Ingestion)       |     | - Institutions    |
+|  with pagination) |     | - Fetch & Enrich  |     | - PopularInst.    |
++-------------------+     | - Store w/ Checks |     +-------------------+
+                            +-------------------+               |
+                                                                v
+                            +-------------------+     +-------------------+
+                            | DynamoDB Streams  | --> | AWS Lambda        |
+                            | (Change Capture)  |     | (Indexer)         |
+                            +-------------------+     | - Upsert to OS    |
+                                                       +-------------------+
+                                                                |
+                                                                v
++-------------------+     +-------------------+     +-------------------+
+| API Gateway       | <-- | AWS Lambda        | <-- | OpenSearch Domain |
+| (REST API)        |     | (Search Handler)  |     | (Search Index)    |
+| GET /institutions |     | - Query OpenSearch|     +-------------------+
++-------------------+     +-------------------+
+```
+
+- **Components**:
+  - **Mastercard Institutions API**: External source for institution data. Called via HTTPS with pagination to fetch all records.
+  - **AWS Lambda (Ingestion)**: Triggered by AWS EventBridge (scheduled cron) to fetch data, check popularity, and write to DynamoDB.
+  - **Amazon DynamoDB**: NoSQL database for persistent storage. Two tables: one for all institutions, one for popular ones.
+  - **DynamoDB Streams**: Captures changes (inserts/updates) and triggers a Lambda for real-time indexing into OpenSearch.
+  - **AWS Lambda (Indexer)**: Processes stream events and upserts documents into OpenSearch.
+  - **Amazon OpenSearch Service**: Managed Elasticsearch for full-text search and ranking.
+  - **AWS Lambda (Search Handler)**: Handles API requests, queries OpenSearch, and returns paginated results.
+  - **Amazon API Gateway**: Exposes the REST API with throttling, authentication, and logging.
+
+- **Interactions**:
+  1. Ingestion Lambda polls Mastercard API in batches (e.g., limit=100, offset increments) until all data is fetched.
+  2. For each institution, query Popular Institutions table; if match, set `isPopular: true`.
+  3. Batch write to Institutions table.
+  4. Streams trigger Indexer Lambda to sync changes to OpenSearch.
+  5. API requests hit API Gateway, invoke Search Lambda, which queries OpenSearch and formats responses.
+
+### 2.2 Data Flow
+- **Ingestion Flow**: Scheduled → Fetch paginated data from Mastercard → Enrich with popularity → Store in DynamoDB → Stream to OpenSearch.
+- **Search Flow**: User query via API → Validate params → Query OpenSearch with ranking → Return JSON with institutions, total count, pagination metadata.
+
+## 3. Data Modeling
+
+### 3.1 DynamoDB Tables
+- **Popular Institutions Table**:
+  - **Table Name**: `PopularInstitutions`
+  - **Partition Key (PK)**: `name` (String) – Unique institution name (e.g., "Chase").
+  - **Attributes**:
+    - `name` (String): Institution name (used for lookups).
+  - **Capacity Mode**: On-demand (auto-scales).
+  - **Usage**: Read-heavy for lookups during ingestion. Assumed <100 items.
+
+- **Institutions Table**:
+  - **Table Name**: `Institutions`
+  - **Partition Key (PK)**: `id` (Number) – Unique institution ID from Mastercard.
+  - **Attributes**: All fields from Mastercard response (e.g., `name` (String), `transAgg` (Boolean), `phone` (String), `urlHomeApp` (String), `branding` (Map), `address` (Map), etc.), plus:
+    - `isPopular` (Boolean): True if matched in PopularInstitutions.
+    - `createdDate` (Number): Timestamp from API.
+    - `status` (String): e.g., "online".
+  - **Capacity Mode**: On-demand.
+  - **Streams**: Enabled (NEW_AND_OLD_IMAGES) for change capture.
+  - **Indexes**: Global Secondary Index (GSI) on `name` (String) for potential queries (if needed beyond search).
+
+### 3.2 AWS OpenSearch Data Model
+- **Index Name**: `institutions-index`
+- **Mapping** (Defined via OpenSearch API or Lambda on setup):
+  ```json
+  {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 1,
+      "analysis": {
+        "analyzer": {
+          "custom_analyzer": {
+            "type": "standard",
+            "filter": ["lowercase"]
+          }
+        }
+      }
+    },
+    "mappings": {
+      "properties": {
+        "id": {"type": "keyword"},
+        "name": {"type": "text", "analyzer": "custom_analyzer", "fields": {"keyword": {"type": "keyword"}}},
+        "isPopular": {"type": "boolean"},
+        "transAgg": {"type": "boolean"},
+        "ach": {"type": "boolean"},
+        "voi": {"type": "boolean"},
+        "voa": {"type": "boolean"},
+        "phone": {"type": "keyword"},
+        "urlHomeApp": {"type": "keyword"},
+        "oauthEnabled": {"type": "boolean"},
+        "class": {"type": "keyword"},
+        "timeZone": {"type": "keyword"},
+        "address": {"type": "object"},
+        "currency": {"type": "keyword"},
+        "email": {"type": "keyword"},
+        "status": {"type": "keyword"},
+        "branding": {"type": "object"},
+        "specialInstructions": {"type": "text"}
+      }
+    }
+  }
+  ```
+- **Searchable Fields**: Primarily `name` (text for fuzzy/full-text search). Other fields like `class`, `status` can be filtered.
+- **Document ID**: Use institution `id` for uniqueness.
+
+## 4. AWS OpenSearch Technical Implementation Details
+
+### 4.1 Ranking Popular Institutions Higher
+- Use a custom query in the Search Lambda:
+  ```json
+  {
+    "query": {
+      "bool": {
+        "must": {
+          "multi_match": {
+            "query": "{search_term}",
+            "fields": ["name^3", "specialInstructions"],
+            "fuzziness": "AUTO"
+          }
+        },
+        "should": {
+          "term": {
+            "isPopular": {
+              "value": true,
+              "boost": 10.0
+            }
+          }
+        }
+      }
+    },
+    "from": {offset},
+    "size": {limit},
+    "sort": [{"_score": "desc"}]
+  }
+  ```
+- **Explanation**: `must` ensures relevance to search term (boost `name` higher). `should` boosts score for `isPopular: true` by a factor of 10, pushing popular results to the top while maintaining relevance.
+
+### 4.2 Optimization
+- **Index Settings**: Use 1 shard/replica for small datasets; scale to more for growth.
+- **Query Performance**: Enable fuzzy matching with `AUTO` (edits based on term length). Use keyword fields for exact filters.
+- **Bulk Indexing**: In Indexer Lambda, use OpenSearch bulk API for batch upserts.
+- **Monitoring**: Integrate Amazon CloudWatch for query latency, error rates, and cluster health.
+
+### 4.3 Search Re-Indexing
+- **Initial Indexing**: Run a one-time Lambda to scan DynamoDB and bulk index to OpenSearch.
+- **Ongoing Re-Indexing**: DynamoDB Streams capture changes; Indexer Lambda processes events (insert/update/delete) and calls OpenSearch `_update` or `_delete`.
+- **Full Re-Index**: If needed (e.g., schema change), trigger a Lambda to truncate index and re-scan DynamoDB.
+- **Idempotency**: Use document ID (`id`) to avoid duplicates.
+
+## 5. Error Handling and Resilience
+
+### 5.1 Data Ingestion Process
+- **Mastercard API Calls**: Use AWS SDK (Node.js/Python) with exponential backoff retry (e.g., max 5 retries, initial delay 1s, max delay 30s). Handle HTTP errors (429 rate limit, 5xx server errors).
+- **DynamoDB Writes**: Batch writes with error checking; unprocessed items retried.
+- **Failures**: Log to CloudWatch; send critical errors to SNS for alerts. Use Dead Letter Queue (DLQ) for failed Lambda invocations.
+- **Idempotency**: Check if institution exists in DynamoDB before insert/update using conditional writes.
+
+### 5.2 API Endpoint
+- **Validation**: Check query params (search required, limit/offset positive integers); return 400 Bad Request on invalid.
+- **OpenSearch Errors**: Catch timeouts/network issues; retry once; return 503 Service Unavailable.
+- **General**: Use try-catch in Lambda; return structured JSON errors (e.g., {"error": "message", "code": 500}).
+
+### 5.3 Backoff Retry for Mastercard API
+- Implement using a library like `retry` (Node.js) or `tenacity` (Python):
+  - Retry on transient errors (429, 500–503).
+  - Exponential backoff: delay = min(30s, base * 2 ** attempt), base=1s.
+  - Jitter: Add random 0–1s to avoid thundering herd.
+
+## 6. Scalability and Performance
+
+### 6.1 Handling Large Data Volumes
+- **Ingestion**: Paginate Mastercard fetches (e.g., limit=100); process in batches to avoid Lambda timeout (set to 15min).
+- **Storage**: DynamoDB on-demand scales to millions of items; OpenSearch handles 10k+ documents easily (start with t3.small.search instance).
+- **Indexing**: Streams process changes in near-real-time; batch size configurable (e.g., 100 records/Lambda invocation).
+
+### 6.2 Concurrent User Requests
+- **API**: API Gateway throttles (e.g., 1000 req/s); Lambda concurrency auto-scales (reserve if needed).
+- **OpenSearch**: Cluster scales horizontally (add nodes); use query caching for common searches.
+- **Performance Targets**: <500ms response time for searches; monitor via X-Ray tracing.
+- **Caching**: Optional Amazon ElastiCache (Redis) for frequent queries, but not initial due to dynamic ranking.
+
+## 7. Security
+
+### 7.1 API Security
+- **Authentication**: Use API Gateway with IAM authorizer or Cognito JWT for client apps.
+- **Rate Limiting**: API Gateway burst/throttle per API key.
+- **Input Validation**: Sanitize search terms to prevent injection (though OpenSearch escapes queries).
+
+### 7.2 Data Storage Security
+- **Encryption**: DynamoDB/OpenSearch encryption at rest (AWS-managed keys); in-transit via HTTPS.
+- **Access Control**: Least-privilege IAM roles for Lambdas (e.g., read-only for Search Lambda on OpenSearch).
+- **Secrets**: Store Mastercard API keys in Secrets Manager; rotate automatically.
+- **Compliance**: Align with PCI DSS (e.g., no storage of sensitive financial data beyond institution metadata).
+- **Auditing**: Enable CloudTrail for API calls; CloudWatch Logs for access patterns.
